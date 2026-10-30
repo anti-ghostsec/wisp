@@ -10,6 +10,11 @@ cargo build --release
 ./target/release/wisp [URL...]
 ```
 
+Every push to `main` publishes a ready-built Linux (x86-64) Wisp as the
+newest [release](https://github.com/anti-ghostsec/wisp/releases/latest),
+built on Debian trixie (`.github/build-linux.sh`). FerroOS's updater installs
+it from there.
+
 ## Privacy defaults
 
 - **Private session**: an ephemeral network session, so cookies, cache and

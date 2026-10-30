@@ -1,0 +1,36 @@
+# Every push to main publishes a ready-built Wisp for Linux, as the newest
+# release. FerroOS's updater installs it from there.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build on Debian trixie
+        run: >
+          docker run --rm -v "$PWD:/src" -w /src -e WISP_COMMIT="$GITHUB_SHA"
+          debian:trixie .github/build-linux.sh dist
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          short=$(echo "$GITHUB_SHA" | cut -c1-7)
+          gh release create "build-$short" --target "$GITHUB_SHA" --latest \
+            --title "Wisp $short" \
+            --notes "Wisp for Linux (x86-64), built from $GITHUB_SHA on Debian trixie." \
+            dist/wisp-linux-x86_64.tar.gz dist/wisp-linux-x86_64.tar.gz.sha256 dist/wisp-commit
