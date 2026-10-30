@@ -1721,6 +1721,15 @@ impl BrowserWindow {
                 return true;
             }
 
+            // claude://, mailto:, magnet: and the like belong to other apps
+            // (a sign-in page handing back to its app, for one).
+            if is_app_link(&uri) {
+                decision.ignore();
+                let page = v.uri().map(|u| u.to_string()).unwrap_or_default();
+                win.open_app_link(&uri, &page);
+                return true;
+            }
+
             // Middle-click or Ctrl+click opens links in a background tab.
             let ctrl = gdk::ModifierType::CONTROL_MASK.bits();
             if action.is_user_gesture() && (action.mouse_button() == 2 || action.modifiers() & ctrl != 0) {
@@ -1740,6 +1749,10 @@ impl BrowserWindow {
             let target = action.request().and_then(|r| r.uri()).map(|u| u.to_string()).unwrap_or_default();
             let opener = v.uri().map(|u| u.to_string()).unwrap_or_default();
             let opener_site = site_of(&opener);
+            if is_app_link(&target) {
+                win.open_app_link(&target, &opener);
+                return None;
+            }
             let is_link = action.navigation_type() == NavigationType::LinkClicked;
             let same_site = !target.is_empty() && site_of(&target) == opener_site;
             let allowed = win.shared.popup_allowed.borrow().contains(&opener_site);
@@ -1773,6 +1786,60 @@ impl BrowserWindow {
                  <h2>This page stopped ({reason:?})</h2><p>Press Ctrl+R to reload.</p>"
             );
             v.load_alternate_html(&html, &uri, None);
+        });
+    }
+
+    /// Hand a link for another app to the app the system has for it, after
+    /// asking (a page could otherwise launch apps at will). "Always" skips
+    /// the question for that kind of link from then on.
+    fn open_app_link(self: &Rc<Self>, uri: &str, page: &str) {
+        let scheme = uri.split(':').next().unwrap_or_default().to_ascii_lowercase();
+        let Some(app) = gio::AppInfo::default_for_uri_scheme(&scheme) else {
+            let dialog = gtk::AlertDialog::builder()
+                .message(format!("No app is set up to open {scheme}: links"))
+                .detail(uri.chars().take(200).collect::<String>())
+                .buttons(["Close"])
+                .build();
+            dialog.show(Some(&self.window));
+            return;
+        };
+        let launch = {
+            let uri = uri.to_string();
+            move || {
+                if let Err(e) = app.launch_uris(&[&uri], None::<&gio::AppLaunchContext>) {
+                    eprintln!("wisp: opening {uri}: {e}");
+                }
+            }
+        };
+        if self.shared.config.borrow().allowed_app_links.contains(&scheme) {
+            launch();
+            return;
+        }
+        let from = site_of(page);
+        let name = gio::AppInfo::default_for_uri_scheme(&scheme).map(|a| a.display_name().to_string()).unwrap_or_default();
+        let dialog = gtk::AlertDialog::builder()
+            .message(format!("Open {name}?"))
+            .detail(if from.is_empty() {
+                format!("A page wants to open a {scheme}: link in {name}.")
+            } else {
+                format!("{from} wants to open a {scheme}: link in {name}.")
+            })
+            .buttons(["Cancel", "Open", "Always open"])
+            .cancel_button(0)
+            .default_button(1)
+            .build();
+        let shared = self.shared.clone();
+        dialog.choose(Some(&self.window), None::<&gio::Cancellable>, move |choice| match choice {
+            Ok(1) => launch(),
+            Ok(2) => {
+                {
+                    let mut cfg = shared.config.borrow_mut();
+                    cfg.allowed_app_links.push(scheme);
+                    cfg.save();
+                }
+                launch();
+            }
+            _ => {}
         });
     }
 
@@ -2677,6 +2744,14 @@ fn shortcut_label(accel: &str) -> String {
 }
 
 /// Approximate registrable domain ("news.bbc.co.uk" -> "bbc.co.uk").
+/// A link for another app rather than something a tab can show.
+fn is_app_link(uri: &str) -> bool {
+    let Some((scheme, _)) = uri.split_once(':') else { return false };
+    let web = ["http", "https", "file", "about", "data", "blob", "javascript", "wisp", "wisp-plugin", "view-source", "ws", "wss"];
+    let valid = !scheme.is_empty() && scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c));
+    valid && !web.contains(&scheme.to_ascii_lowercase().as_str())
+}
+
 fn site_of(uri: &str) -> String {
     let host = privacy::scheme_and_host(uri).map(|(_, h)| h).unwrap_or("").to_ascii_lowercase();
     if host.parse::<std::net::IpAddr>().is_ok() {
@@ -2845,5 +2920,15 @@ mod tests {
         assert!(parse_settings(r#"{ "https_only": false }"#).is_ok_and(|c| !c.https_only));
         assert!(parse_settings(r#"{ "https_onyl": false }"#).unwrap_err().contains("https_onyl"));
         assert!(parse_settings(r#"{ "https_only": false, }"#).unwrap_err().starts_with("Line 1"));
+    }
+
+    #[test]
+    fn app_links() {
+        for uri in ["claude://claude.ai/login?code=x", "mailto:a@b.c", "magnet:?xt=urn", "steam://run/1"] {
+            assert!(is_app_link(uri), "{uri}");
+        }
+        for uri in ["https://claude.ai", "about:blank", "wisp:history", "wisp-plugin://x/p.html", "data:text/plain,x", "blob:https://a/b", "localhost"] {
+            assert!(!is_app_link(uri), "{uri}");
+        }
     }
 }

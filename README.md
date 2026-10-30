@@ -37,6 +37,10 @@ it from there.
 - **Site databases** (IndexedDB), which many sites and web apps need, are
   allowed: in the private session they stay in memory and are gone when Wisp
   quits. Untick **Allow site databases** in the ☰ menu to turn them off.
+- **App links** (`claude://`, `mailto:`, `magnet:`, …), such as a sign-in
+  page handing you back to its app, open in the app your system has for
+  them, after asking. **Always open** skips the question for that kind of
+  link (stored in `allowed_app_links`).
 - **Permissions**: geolocation, camera, microphone and notification requests
   are denied.
 - **Fingerprinting**: the `fingerprint-shield` plugin reports uniform device values.

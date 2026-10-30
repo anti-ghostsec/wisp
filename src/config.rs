@@ -31,6 +31,8 @@ pub struct Config {
     /// Let sites use IndexedDB. In a private session it lives in memory
     /// and is gone when Wisp quits, like cookies.
     pub site_databases: bool,
+    /// Kinds of app links (e.g. "claude", "mailto") opened without asking.
+    pub allowed_app_links: Vec<String>,
     pub webrtc: bool,
     /// Custom user agent; null keeps WebKit's generic default.
     pub user_agent: Option<String>,
@@ -84,6 +86,7 @@ impl Default for Config {
             javascript: true,
             webgl: false,
             site_databases: true,
+            allowed_app_links: Vec::new(),
             webrtc: false,
             user_agent: None,
             gpu_compositing: true,
