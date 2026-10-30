@@ -82,7 +82,8 @@ if you're offline, they're retried until they go through.
 
 **Passwords**: a key button appears in password fields (and in username
 fields on sites with saved logins). It lists the saved logins for the site,
-offers **Generate strong password**, and links to the password manager
+offers **Generate strong password** (the most recently used login first,
+then the newest saved), and links to the password manager
 (the key in the toolbar), where you can view, edit, add and delete logins.
 Right-clicking a text field also offers **Fill saved login…** and **Generate
 strong password**. A lone password field while you're logged in (a "confirm

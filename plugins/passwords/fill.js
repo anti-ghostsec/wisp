@@ -83,11 +83,33 @@
           return null;
         }
       })
-      .filter((e) => e && e.password && siteOf(e.host) === site)
-      // Logins saved on this exact host first.
-      .sort((a, b) => (b.host === host) - (a.host === host));
+      .filter((e) => e && e.password && siteOf(e.host) === site);
+    lastUsed = (await wisp.storage.get("used")) || {};
+    // Forget logins that no longer exist.
+    const ids = new Set(entries.map((e) => String(e.id)));
+    const stale = Object.keys(lastUsed).filter((id) => !ids.has(id));
+    if (stale.length) {
+      stale.forEach((id) => delete lastUsed[id]);
+      wisp.storage.set("used", lastUsed);
+    }
+    sortSaved();
     return saved;
   };
+  // When each login (by id) was last filled or used to log in, kept on this
+  // computer only. The most recently used come first, then the newest saved;
+  // logins saved on this exact host before the rest of the site's.
+  let lastUsed = {};
+  const sortSaved = () =>
+    saved.sort((a, b) => (lastUsed[b.id] || 0) - (lastUsed[a.id] || 0) || (b.host === host) - (a.host === host) || b.id - a.id);
+  // Sent at once, without waiting on anything: logging in usually leaves
+  // the page within milliseconds.
+  const markUsed = (cred) => {
+    if (!cred) return;
+    lastUsed = { ...lastUsed, [cred.id]: Date.now() };
+    wisp.storage.set("used", lastUsed);
+    if (saved) sortSaved();
+  };
+
 
   // Usernames typed on a "username first, password on the next step" page.
   let typedUsername = "";
@@ -246,6 +268,7 @@
 
   // ---- filling ----
   const fillFrom = (field, cred) => {
+    markUsed(cred);
     if (isPassword(field)) {
       const user = usernameFieldFor(field);
       if (user && cred.username && user.value !== cred.username) setValue(user, cred.username);
@@ -353,6 +376,7 @@
       at: Date.now(),
     };
     wisp.session.set("pending:" + site, pending);
+    markUsed(saved?.find((c) => c.password === password && (!pending.username || !c.username || c.username === pending.username)));
     watchForSuccess(pw);
   };
 
