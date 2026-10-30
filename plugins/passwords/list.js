@@ -86,7 +86,7 @@
       code.textContent = hidden ? e.password : DOTS;
       show.textContent = hidden ? "Hide" : "Show";
     });
-    const copy = button("Copy", () => navigator.clipboard.writeText(e.password).then(() => status("Password copied"), () => {}));
+    const copy = button("Copy", () => wisp.clipboard.write(e.password, { secret: true }).then(() => status("Password copied; cleared from the clipboard in 45 seconds"), (err) => status("Copy failed: " + err.message)));
     const actions = cell(
       button("Edit", () => { editing = e.id; render(); }),
       button("Delete", async () => {
@@ -104,7 +104,7 @@
     const site = Object.assign(document.createElement("a"), { href: e.url, textContent: e.site, target: "_blank" });
     const user = cell(e.username);
     user.title = "Double-click to copy";
-    user.ondblclick = () => navigator.clipboard.writeText(e.username).then(() => status("Username copied"), () => {});
+    user.ondblclick = () => wisp.clipboard.write(e.username).then(() => status("Username copied"), (err) => status("Copy failed: " + err.message));
     tr.append(cell(site), user, cell(code, show, copy), actions);
     return tr;
   };

@@ -354,6 +354,7 @@ fn api_prelude(p: &Plugin, gpu_compositing: bool) -> String {
     downloads: Object.freeze({{ start: (url) => call("downloads.start", {{ url }}) }}),
     cookies: Object.freeze({{ netscape: (url) => call("cookies.netscape", {{ url }}) }}),
     openPath: (path) => call("open.path", {{ path }}),
+    clipboard: Object.freeze({{ write: (text, {{ secret = false }} = {{}}) => call("clipboard.write", {{ text: String(text), secret: !!secret }}) }}),
     tabs: Object.freeze({{
       open: (url) => call("tabs.open", {{ url }}),
       current: () => call("tabs.current"),
@@ -788,6 +789,32 @@ impl PluginHost {
         let key = || args["key"].as_str().map(str::to_owned).ok_or("missing \"key\"".to_string());
         let (area, verb) = op.split_once('.').unwrap_or((op, ""));
         match (area, verb) {
+            ("clipboard", "write") => {
+                need("clipboard")?;
+                let text = args["text"].as_str().ok_or("missing \"text\"")?.to_string();
+                let display = gtk::gdk::Display::default().ok_or("no display")?;
+                if !args["secret"].as_bool().unwrap_or(false) {
+                    display.clipboard().set_text(&text);
+                    return Ok(Json::Null);
+                }
+                // A secret is marked so clipboard histories don't keep it
+                // (the hint KDE's and FerroOS's honor), and cleared after 45
+                // seconds if it's still there.
+                let provider = gtk::gdk::ContentProvider::new_union(&[
+                    gtk::gdk::ContentProvider::for_value(&text.to_value()),
+                    gtk::gdk::ContentProvider::for_bytes("x-kde-passwordManagerHint", &glib::Bytes::from_static(b"secret")),
+                ]);
+                display.clipboard().set_content(Some(&provider)).map_err(|e| e.to_string())?;
+                glib::timeout_add_seconds_local_once(45, move || {
+                    let clipboard = display.clipboard();
+                    glib::spawn_future_local(async move {
+                        if clipboard.read_text_future().await.ok().flatten().is_some_and(|t| t == text) {
+                            clipboard.set_text("");
+                        }
+                    });
+                });
+                Ok(Json::Null)
+            }
             ("log", _) => {
                 println!("[plugin {}] {}", p.manifest.id, args["message"].as_str().unwrap_or(""));
                 Ok(Json::Null)

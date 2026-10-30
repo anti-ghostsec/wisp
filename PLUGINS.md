@@ -16,7 +16,7 @@ source tree.
   "version": "1.0",
   "description": "Shown as a tooltip in the plugin menu.",
   "enabled_by_default": true,
-  "permissions": ["storage", "tabs", "notifications", "sync"],
+  "permissions": ["storage", "tabs", "notifications", "sync", "clipboard"],
   "background": ["background.js"],
   "native": ["python3", "host/helper.py"],
   "sync_prefixes": ["x_"],
@@ -90,6 +90,8 @@ await wisp.storage.get(key)      // "storage": JSON value or null
 await wisp.storage.set(key, val) // persisted to ~/.local/share/wisp/plugin-data/, 1 MB quota
 await wisp.storage.remove(key)
 await wisp.storage.keys()
+await wisp.clipboard.write(text)                    // "clipboard": copy text (works where navigator.clipboard is blocked)
+await wisp.clipboard.write(pw, { secret: true })    // marked so clipboard histories skip it, cleared after 45 s
 await wisp.tabs.open(url)        // "tabs": open an http(s) URL in a background tab, or one of
                                  // the plugin's own pages in front
 await wisp.tabs.current()        // "tabs": { id, url, title } of the current tab
