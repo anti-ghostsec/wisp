@@ -111,7 +111,8 @@ All optional, from the ☰ menu:
   bar. Bookmarks that don't fit are under » at the end (or scroll the bar
   with the mouse wheel). Click to open, middle-click for a new tab, drag one
   to move it: along the bar, within the » menu, or between the two (hold it
-  over » to open the menu). Right-click to open it in a new tab, move it to
+  over » to open the menu). New bookmarks (Ctrl+D, or a tab dropped on the
+  bar's empty part) go first. Right-click to open it in a new tab, move it to
   the start or delete it. The bookmarks page
   (Ctrl+Shift+O) lists them in the same order: drag the ⠿ handle to
   reorder, or edit names and addresses. The order syncs with the bookmarks.
@@ -186,8 +187,8 @@ misspelled setting names) before saving. Restart Wisp (Ctrl+Q) to apply.
 | Ctrl+Shift+I, F12 | Web Inspector |
 | Ctrl+D / Ctrl+Shift+O | Bookmark page / show bookmarks |
 | + after the last tab, or double-click the empty tab bar | New tab |
-| Drag a tab | Move it |
-| Middle-click / Ctrl+click on a link | Open in background tab |
+| Drag a tab | Move it; drop it on the bookmarks bar to bookmark it there |
+| Middle-click / Ctrl+click on a link, or right-click → Open Link in New Tab | Open in a background tab (you stay where you are) |
 
 ## Plugins
 

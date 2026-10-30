@@ -253,6 +253,16 @@ impl Shared {
                     }
                     child = ch.next_sibling();
                 }
+                // Past the last item of a list: after it.
+                if found.is_none() && zone.area.is_some() {
+                    let mut last = c.last_child();
+                    while let Some(l) = last.clone().filter(|l| *l == it || l.widget_name() == it.widget_name() || !l.is_visible()) {
+                        last = l.prev_sibling();
+                    }
+                    if let Some(l) = last.filter(|l| l.compute_bounds(c).is_some_and(|b| pos >= if zone.vertical { b.y() } else { b.x() })) {
+                        found = Some((l, true, MARKS[zone.vertical as usize * 2 + 1]));
+                    }
+                }
                 if found.is_some() {
                     break;
                 }
@@ -1464,6 +1474,7 @@ impl BrowserWindow {
             upgraded_from: RefCell::new(None),
         });
 
+        tab_header.set_widget_name(&format!("tab:{}", tab.id));
         tab_header.append(&label);
         let close = gtk::Button::from_icon_name("window-close-symbolic");
         close.add_css_class("flat");
@@ -1574,6 +1585,7 @@ impl BrowserWindow {
         let w = Rc::downgrade(self);
         view.connect_context_menu(move |view, menu, hit| {
             if let Some(win) = w.upgrade() {
+                win.adjust_link_menu(menu, hit);
                 win.add_plugin_menu_items(view, menu, hit);
             }
             false
@@ -1896,6 +1908,34 @@ impl BrowserWindow {
         popover.popup();
     }
 
+    /// "Open Link" goes (a click does that); "Open Link in New Window"
+    /// becomes "Open Link in New Tab", which opens it in the background so
+    /// you stay where you are while it loads. Likewise for images.
+    fn adjust_link_menu(self: &Rc<Self>, menu: &webkit6::ContextMenu, hit: &webkit6::HitTestResult) {
+        use webkit6::ContextMenuAction as A;
+        for (pos, item) in menu.items().iter().enumerate().rev() {
+            let (label, uri) = match item.stock_action() {
+                A::OpenLink => {
+                    menu.remove(item);
+                    continue;
+                }
+                A::OpenLinkInNewWindow => ("Open Link in New Tab", hit.link_uri()),
+                A::OpenImageInNewWindow => ("Open Image in New Tab", hit.image_uri()),
+                _ => continue,
+            };
+            let Some(uri) = uri else { continue };
+            let action = gio::SimpleAction::new("open-in-tab", None);
+            let (w, uri) = (Rc::downgrade(self), uri.to_string());
+            action.connect_activate(move |_, _| {
+                if let Some(win) = w.upgrade() {
+                    win.new_tab(Some(&uri), None, false);
+                }
+            });
+            menu.remove(item);
+            menu.insert(&webkit6::ContextMenuItem::from_gaction(&action, label, None), pos as i32);
+        }
+    }
+
     fn add_plugin_menu_items(&self, view: &WebView, menu: &webkit6::ContextMenu, hit: &webkit6::HitTestResult) {
         let mut separated = false;
         for p in self.shared.plugins.enabled() {
@@ -1942,11 +1982,31 @@ impl BrowserWindow {
         }
     }
 
-    /// Tabs can be dragged to a new position in the strip.
+    /// Tabs can be dragged to a new position in the strip, or onto the
+    /// bookmarks bar to bookmark them there.
     fn make_draggable(self: &Rc<Self>, tab: &Rc<Tab>) {
+        let w = Rc::downgrade(self);
+        let zones = move |_: &gtk::graphene::Point| {
+            let Some(win) = w.upgrade() else { return Vec::new() };
+            let mut zones = Vec::new();
+            if win.bookmarks_row.is_visible() {
+                zones.push(DropZone {
+                    container: win.bookmarks_bar.clone().upcast(),
+                    vertical: false,
+                    area: Some(win.bookmarks_scroll.clone().upcast()),
+                });
+            }
+            zones.push(DropZone { container: win.strip.clone().upcast(), vertical: false, area: None });
+            zones
+        };
         let (w, t) = (Rc::downgrade(self), Rc::downgrade(tab));
-        self.shared.reorderable(&tab.header, &tab.header, &self.strip, false, move |target, after| {
+        self.shared.reorderable_zones(&tab.header, &tab.header, zones, move |target, after| {
             let (Some(win), Some(moved)) = (w.upgrade(), t.upgrade()) else { return };
+            if target.parent().as_ref() == Some(win.bookmarks_bar.upcast_ref()) {
+                let at = target.widget_name().strip_prefix("bookmark:").and_then(|t| t.parse::<i64>().ok()).map(|id| (id, after));
+                win.bookmark_tab(&moved, at);
+                return;
+            }
             let onto = win.tabs.borrow().iter().find(|x| x.header.upcast_ref::<gtk::Widget>() == &target).cloned();
             let Some(onto) = onto else { return };
             let Some(mut to) = win.notebook.page_num(&onto.page) else { return };
@@ -1960,6 +2020,37 @@ impl BrowserWindow {
             win.notebook.reorder_child(&moved.page, Some(to));
             win.order_strip();
             win.shared.save_session_soon();
+        });
+    }
+
+    /// Bookmark a tab's page next to bookmark `at` (id, after it), or first.
+    fn bookmark_tab(&self, tab: &Tab, at: Option<(i64, bool)>) {
+        let url = tab.uri.borrow().clone();
+        if !(url.starts_with("https://") || url.starts_with("http://")) {
+            return;
+        }
+        let title = Some(tab.title.borrow().trim().to_string()).filter(|t| !t.is_empty()).unwrap_or_else(|| site_of(&url));
+        let first = self.bookmark_items.borrow().first().map(|(_, id, _, _)| *id);
+        let Some((target, after)) = at.or(first.map(|f| (f, false))) else {
+            return self.add_bookmark(title, url, None);
+        };
+        self.add_bookmark(title, url, Some((target, after)));
+    }
+
+    fn add_bookmark(&self, title: String, url: String, at: Option<(i64, bool)>) {
+        let sync = self.shared.sync.clone();
+        glib::spawn_future_local(async move {
+            let prefix = ["b_".to_string()];
+            let result = match sync.add(serde_json::json!({ "title": format!("b_{title}"), "url": url })).await {
+                Ok(id) => match at {
+                    Some((target, after)) => sync.move_entry(id, target, after, &prefix).await,
+                    None => Ok(()),
+                },
+                Err(e) => Err(e),
+            };
+            if let Err(e) = result {
+                eprintln!("wisp: adding bookmark: {e}");
+            }
         });
     }
 
