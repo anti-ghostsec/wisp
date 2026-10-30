@@ -1289,6 +1289,14 @@ impl BrowserWindow {
                 shared.state.clear_session();
             }
         }));
+        let databases = toggle("Allow site databases", cfg.site_databases, |shared, on| {
+            shared.config.borrow_mut().site_databases = on;
+            shared.settings.set_enable_html5_database(on);
+        });
+        databases.set_tooltip_text(Some(
+            "IndexedDB, which some sites and web apps need. In a private session it's kept in memory and deleted when Wisp quits. Reload a page to apply.",
+        ));
+        vbox.append(&databases);
         vbox.append(&gtk::Button::builder().label("History (Ctrl+H)").action_name("win.history").build());
         vbox.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 

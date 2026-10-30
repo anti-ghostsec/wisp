@@ -78,7 +78,7 @@ pub fn settings(cfg: &Config) -> Settings {
     });
     // Back/forward page cache keeps whole pages alive in RAM.
     s.set_enable_page_cache(!cfg.low_memory_cache);
-    s.set_enable_html5_database(cfg.persistent_profile);
+    s.set_enable_html5_database(cfg.site_databases);
     s.set_javascript_can_open_windows_automatically(false);
     s.set_javascript_can_access_clipboard(false);
     s.set_media_playback_requires_user_gesture(true);

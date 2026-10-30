@@ -34,6 +34,9 @@ it from there.
 - **Disabled features**: WebGL, WebRTC, WebKit's own credential storage and
   script popups are off. The ad blocker also blocks third-party `<a ping>`
   beacons.
+- **Site databases** (IndexedDB), which many sites and web apps need, are
+  allowed: in the private session they stay in memory and are gone when Wisp
+  quits. Untick **Allow site databases** in the ☰ menu to turn them off.
 - **Permissions**: geolocation, camera, microphone and notification requests
   are denied.
 - **Fingerprinting**: the `fingerprint-shield` plugin reports uniform device values.

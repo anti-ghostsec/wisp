@@ -28,6 +28,9 @@ pub struct Config {
     pub tracking_prevention: bool,
     pub javascript: bool,
     pub webgl: bool,
+    /// Let sites use IndexedDB. In a private session it lives in memory
+    /// and is gone when Wisp quits, like cookies.
+    pub site_databases: bool,
     pub webrtc: bool,
     /// Custom user agent; null keeps WebKit's generic default.
     pub user_agent: Option<String>,
@@ -80,6 +83,7 @@ impl Default for Config {
             tracking_prevention: true,
             javascript: true,
             webgl: false,
+            site_databases: true,
             webrtc: false,
             user_agent: None,
             gpu_compositing: true,
