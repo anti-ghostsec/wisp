@@ -40,7 +40,8 @@ async function postToHost(msg) {
 
 async function refreshStatus() {
   const opts = await getOptions();
-  postToHost({ action: "status", ytdlpPath: opts.ytdlpPath });
+  // The helper fetches yt-dlp itself the first time, and keeps it updated.
+  postToHost({ action: "status", ytdlpPath: opts.ytdlpPath, autoInstall: true });
 }
 
 function onHostMessage(msg) {

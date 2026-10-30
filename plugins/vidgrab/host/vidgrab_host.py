@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.request
 
 HOST_VERSION = "1.0.0"
@@ -179,8 +180,22 @@ def run_capture(cmd, timeout=60):
     return p.returncode, p.stdout.strip(), p.stderr.strip()
 
 
+# yt-dlp fetched by VidGrab itself, and when it last checked for a newer one.
+OWN_YTDLP = os.path.join(DATA_DIR, "yt-dlp")
+UPDATE_STAMP = os.path.join(DATA_DIR, "last-update-check")
+UPDATE_EVERY = 7 * 24 * 3600
+install_lock = threading.Lock()
+
+
 def handle_status(msg):
     ytdlp = find_ytdlp(msg.get("ytdlpPath"))
+    if not ytdlp and msg.get("autoInstall"):
+        # First use: fetch yt-dlp in the background, then report again.
+        send({"type": "status", "hostVersion": HOST_VERSION, "installing": True})
+        threading.Thread(target=install_then_status, args=(msg,), daemon=True).start()
+        return
+    if ytdlp == [OWN_YTDLP]:
+        threading.Thread(target=update_if_due, daemon=True).start()
     info = {
         "type": "status",
         "hostVersion": HOST_VERSION,
@@ -265,13 +280,26 @@ def build_download_cmd(ytdlp, msg):
         "-P", out_dir,
         "-o", template,
     ]
-    cmd += PRESETS.get(msg.get("preset", "best"), PRESETS["best"])
+    preset = msg.get("preset", "best")
+    # Without ffmpeg, yt-dlp can't merge separate video and audio, convert
+    # or embed anything: take the best single file as it comes instead.
+    ffmpeg = shutil.which("ffmpeg", path=search_path())
+    if not ffmpeg and preset in ("audio_mp3", "audio_m4a"):
+        raise RuntimeError("Converting to MP3 or M4A needs ffmpeg (sudo apt install ffmpeg). "
+                           "\"Audio only (original)\" works without it.")
+    if ffmpeg:
+        cmd += PRESETS.get(preset, PRESETS["best"])
+    elif preset == "audio_best":
+        cmd += ["-f", "ba/b"]
+    else:
+        height = preset if preset.isdigit() else None
+        cmd += ["-f", f"b[height<={height}][ext=mp4]/b[height<={height}]/b" if height else "b[ext=mp4]/b"]
     if not opts.get("allowPlaylist"):
         cmd.append("--no-playlist")
-    if opts.get("embedMetadata"):
+    if opts.get("embedMetadata") and ffmpeg:
         cmd += ["--embed-metadata", "--embed-thumbnail"]
     if opts.get("subtitles"):
-        cmd += ["--write-subs", "--sub-langs", opts.get("subLangs") or "en.*", "--embed-subs"]
+        cmd += ["--write-subs", "--sub-langs", opts.get("subLangs") or "en.*"] + (["--embed-subs"] if ffmpeg else [])
     if opts.get("sponsorblock"):
         cmd += ["--sponsorblock-remove", "sponsor,selfpromo,interaction"]
     if opts.get("useCookies") == "always":
@@ -442,21 +470,61 @@ def handle_cancel(msg):
             pass
 
 
-def handle_install(msg):
-    """Fetch the official yt-dlp release into DATA_DIR (as install.sh --fetch-ytdlp does)."""
+def install_ytdlp():
+    """Fetch the official yt-dlp release into DATA_DIR (as install.sh --fetch-ytdlp does).
+    Returns (ok, message)."""
     url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
-    target = os.path.join(DATA_DIR, "yt-dlp")
+    with install_lock:
+        if os.access(OWN_YTDLP, os.X_OK):
+            return True, f"yt-dlp is in {OWN_YTDLP}"
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            tmp = OWN_YTDLP + ".tmp"
+            with urllib.request.urlopen(url, timeout=120) as r, open(tmp, "wb") as f:
+                shutil.copyfileobj(r, f)
+            os.chmod(tmp, 0o755)
+            os.replace(tmp, OWN_YTDLP)
+            touch(UPDATE_STAMP)
+            code, out, err = run_capture([OWN_YTDLP, "--version"], timeout=60)
+            return code == 0, f"Installed yt-dlp {out} to {OWN_YTDLP}" if code == 0 else err
+        except Exception as e:  # noqa: BLE001
+            return False, f"Couldn't install yt-dlp: {e}"
+
+
+def install_then_status(msg):
+    ok, output = install_ytdlp()
+    if not ok:
+        send({"type": "status", "hostVersion": HOST_VERSION, "error": output})
+        return
+    handle_status(dict(msg, autoInstall=False))
+
+
+def handle_install(msg):
+    ok, output = install_ytdlp()
+    send({"type": "update", "ok": ok, "output": output})
+
+
+def touch(path):
+    with open(path, "a"):
+        os.utime(path, None)
+
+
+def update_if_due():
+    """Keep VidGrab's own yt-dlp current: sites change, yt-dlp follows within days."""
     try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        tmp = target + ".tmp"
-        with urllib.request.urlopen(url, timeout=120) as r, open(tmp, "wb") as f:
-            shutil.copyfileobj(r, f)
-        os.chmod(tmp, 0o755)
-        os.replace(tmp, target)
-        code, out, err = run_capture([target, "--version"], timeout=60)
-        send({"type": "update", "ok": code == 0, "output": f"Installed yt-dlp {out} to {target}" if code == 0 else err})
-    except Exception as e:  # noqa: BLE001
-        send({"type": "update", "ok": False, "output": f"Couldn't install yt-dlp: {e}"})
+        if time.time() - os.path.getmtime(UPDATE_STAMP) < UPDATE_EVERY:
+            return
+    except OSError:
+        pass
+    if not install_lock.acquire(blocking=False):
+        return
+    try:
+        touch(UPDATE_STAMP)
+        run_capture([OWN_YTDLP, "-U"], timeout=300)
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        install_lock.release()
 
 
 def handle_open(msg):

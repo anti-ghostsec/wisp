@@ -36,6 +36,11 @@ function renderHost(status) {
   if (!status) {
     badge.textContent = "…";
     badge.className = "pill";
+  } else if (status.installing) {
+    badge.textContent = "setting up…";
+    badge.className = "pill";
+    $("setup-error").textContent = "Downloading yt-dlp (a few MB, once). It updates itself after that.";
+    $("install").hidden = true;
   } else if (ready) {
     badge.textContent = `yt-dlp ${status.ytdlp}`;
     badge.className = "pill ok";
@@ -44,6 +49,7 @@ function renderHost(status) {
   } else {
     badge.textContent = "not ready";
     badge.className = "pill err";
+    $("install").hidden = false;
     $("setup-error").textContent = status.error
       || (status.hostVersion ? "Helper is installed, but yt-dlp was not found." : "");
   }

@@ -191,9 +191,13 @@ its buttons out of the toolbar (they then appear next to it in the menu).
 **VidGrab** downloads videos from YouTube and the 1000+ other sites
 [yt-dlp](https://github.com/yt-dlp/yt-dlp) supports: use its toolbar
 button, or right-click a page, video or link. On other sites it spots the
-video streams a page plays (start the video first). The first time, click
-**Install yt-dlp** in its popup; it needs `python3`, and `ffmpeg` for HD
-video and MP3 (`sudo apt install ffmpeg`). When a site asks for a login,
+video streams a page plays (start the video first). yt-dlp sets itself up
+the first time you use VidGrab (a few MB, into `~/.local/share/vidgrab`) and
+checks for updates weekly, since sites change and yt-dlp follows within
+days; a yt-dlp already on `PATH` is used as is. It needs `python3`. With
+`ffmpeg` (`sudo apt install ffmpeg`) you also get HD (sites send video and
+audio separately above 720p), MP3/M4A conversion and embedded metadata;
+without it, VidGrab downloads the best single-file version. When a site asks for a login,
 yt-dlp gets your cookies for that site in a private temporary file that's
 deleted when the download ends.
 
