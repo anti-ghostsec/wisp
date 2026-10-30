@@ -1,0 +1,21 @@
+{
+  "id": "vidgrab",
+  "name": "VidGrab",
+  "version": "1.0",
+  "description": "Downloads videos from YouTube and 1000+ other sites with yt-dlp, and spots video streams on other pages.",
+  "permissions": ["native", "storage", "tabs", "notifications", "downloads", "media", "cookies"],
+  "native": ["python3", "host/vidgrab_host.py"],
+  "background": ["shared.js", "background.js"],
+  "actions": [
+    { "id": "popup", "label": "VidGrab", "icon": "icons/vidgrab-symbolic.svg", "popup": "popup/popup.html" }
+  ],
+  "context_menu": [
+    { "id": "page", "label": "Download video on this page", "contexts": ["page", "media"] },
+    { "id": "link", "label": "Download linked video", "contexts": ["link"] },
+    { "id": "link-audio", "label": "Download linked video as MP3", "contexts": ["link"] }
+  ],
+  "content_scripts": [
+    { "matches": ["wisp-plugin://vidgrab/popup/*"], "js": ["shared.js", "popup/popup.js"], "run_at": "document_end" },
+    { "matches": ["wisp-plugin://vidgrab/options/*"], "js": ["shared.js", "options/options.js"], "run_at": "document_end" }
+  ]
+}

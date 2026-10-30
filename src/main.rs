@@ -5,6 +5,7 @@ mod config;
 mod downloads;
 mod icons;
 mod launch;
+mod native;
 mod plugins;
 mod privacy;
 mod state;

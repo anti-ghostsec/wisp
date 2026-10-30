@@ -1,0 +1,75 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>VidGrab settings</title>
+  <link rel="stylesheet" href="../popup/popup.css">
+  <style>
+    body { width: auto; max-width: 640px; margin: 24px auto; padding: 0 16px; }
+    label { display: block; margin: 14px 0 4px; font-weight: 600; }
+    .check { display: flex; gap: 8px; align-items: center; font-weight: 400; margin: 10px 0; }
+    input[type=text], select { width: 100%; }
+    .hint { font-size: 12px; color: var(--muted); margin-top: 3px; }
+    .actions { display: flex; gap: 8px; margin-top: 20px; align-items: center; }
+    pre { white-space: pre-wrap; max-height: 200px; overflow: auto; font-size: 11px; }
+    section { border: 1px solid var(--border); border-radius: 8px; margin: 16px 0; padding: 12px 16px; }
+  </style>
+</head>
+<body>
+  <h1>VidGrab settings</h1>
+
+  <section>
+    <h2>Helper status</h2>
+    <div id="status" class="muted">Checking…</div>
+    <div class="actions">
+      <button id="recheck">Check again</button>
+      <button id="update">Update yt-dlp</button>
+    </div>
+    <pre id="update-output" hidden></pre>
+  </section>
+
+  <section>
+    <h2>Downloads</h2>
+    <label for="outputDir">Download folder</label>
+    <input type="text" id="outputDir" placeholder="(your Downloads folder)">
+
+    <label for="defaultPreset">Default quality</label>
+    <select id="defaultPreset"></select>
+
+    <label for="filenameTemplate">File name template</label>
+    <input type="text" id="filenameTemplate">
+    <div class="hint">yt-dlp output template, e.g. <code>%(uploader)s/%(title)s.%(ext)s</code></div>
+
+    <label class="check"><input type="checkbox" id="allowPlaylist"> Download the whole playlist when the URL has one</label>
+    <label class="check"><input type="checkbox" id="embedMetadata"> Embed metadata and thumbnail</label>
+    <label class="check"><input type="checkbox" id="subtitles"> Download and embed subtitles</label>
+    <label for="subLangs">Subtitle languages</label>
+    <input type="text" id="subLangs">
+    <label class="check"><input type="checkbox" id="sponsorblock"> Cut sponsor segments (SponsorBlock, YouTube only)</label>
+    <label class="check"><input type="checkbox" id="notify"> Show a notification when a download finishes</label>
+  </section>
+
+  <section>
+    <h2>Advanced</h2>
+    <label for="useCookies">Use my login</label>
+    <select id="useCookies">
+      <option value="auto">Only when a site asks for it (recommended)</option>
+      <option value="always">Always</option>
+      <option value="off">Never</option>
+    </select>
+    <div class="hint">Fixes "Sign in to confirm you're not a bot", age-restricted and members-only videos: Wisp gives yt-dlp your cookies for that site, in a private temporary file deleted when the download ends.</div>
+
+    <label for="ytdlpPath">yt-dlp path</label>
+    <input type="text" id="ytdlpPath" placeholder="(auto-detect)">
+
+    <label for="extraArgs">Extra yt-dlp arguments</label>
+    <input type="text" id="extraArgs" placeholder="e.g. --limit-rate 5M">
+  </section>
+
+  <div class="actions">
+    <button id="save" class="primary">Save</button>
+    <span id="saved" class="muted"></span>
+  </div>
+
+</body>
+</html>

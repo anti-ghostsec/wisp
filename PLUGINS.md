@@ -17,6 +17,8 @@ source tree.
   "description": "Shown as a tooltip in the plugin menu.",
   "enabled_by_default": true,
   "permissions": ["storage", "tabs", "notifications", "sync"],
+  "background": ["background.js"],
+  "native": ["python3", "host/helper.py"],
   "sync_prefixes": ["x_"],
   "content_scripts": [
     {
@@ -35,7 +37,8 @@ source tree.
   ],
   "actions": [
     { "id": "toggle", "label": "Do the thing", "icon": "icons/thing.svg", "shortcut": "<Ctrl>d" },
-    { "id": "list", "label": "Open my page", "icon": "view-list-symbolic", "page": "list.html" }
+    { "id": "list", "label": "Open my page", "icon": "view-list-symbolic", "page": "list.html" },
+    { "id": "menu", "label": "My popup", "icon": "icons/menu.svg", "popup": "popup.html" }
   ],
   "context_menu": [
     { "id": "insert", "label": "Insert the thing", "contexts": ["editable"] }
@@ -54,8 +57,10 @@ source tree.
 | `world` | `isolated` (default) or `page`; see below. |
 | `blocklists` | [WebKit content-blocker](https://webkit.org/blog/3476/content-blockers-first-look/) JSON files. They are compiled to bytecode once and cached, which makes them far cheaper than JS-based blocking. |
 | `filter_lists` | Adblock Plus / EasyList / uBlock lists, downloaded and converted to WebKit rules (network rules only; cosmetic `##` rules and options WebKit can't express are skipped). Refreshed every `refresh_days` days (default 4). |
-| `actions` | Toolbar buttons (with optional shortcut). `icon` is either an `.svg` file in the plugin folder (single-color; its `<path>` shapes are drawn in the theme's text color, 16×16 viewBox) or an icon-theme name. With `page`, the action opens that plugin page in a new tab. Without it, an `action` event goes to the plugin's isolated script on the current page. |
-| `context_menu` | Right-click menu entries. `contexts` says where they show: `editable` (text fields), `link`, `selection` or `page` (everywhere, the default). Choosing one sends a `context-menu` event to the plugin's isolated script on that page. |
+| `actions` | Toolbar buttons (with optional shortcut). With `popup`, the button shows that plugin page in a popup under it, given `?tab=<id>` of the current tab; `window.close()` closes it. `icon` is either an `.svg` file in the plugin folder (single-color; its `<path>` shapes are drawn in the theme's text color, 16×16 viewBox) or an icon-theme name. With `page`, the action opens that plugin page in a new tab. Without it, an `action` event goes to the plugin's isolated script on the current page. |
+| `context_menu` | Right-click menu entries. `contexts` says where they show: `editable` (text fields), `link`, `media` (video and audio), `selection` or `page` (everywhere, the default). Choosing one sends a `context-menu` event `{ id, tabId, pageUrl, pageTitle, linkUrl, mediaUrl }` to the plugin's background script if it has one, otherwise to its isolated script on that page. |
+| `background` | Scripts that run in a hidden page (`wisp-plugin://<id>/_background.html`) for as long as the plugin is enabled, like an extension's background page. They have the `wisp` API. |
+| `native` | A helper program the background script talks to (needs `native`): the command and its arguments. Arguments naming files in the plugin folder become full paths; the command is looked up on `PATH`. It speaks the WebExtensions native-messaging format (JSON preceded by a 32-bit little-endian length), so Firefox helpers work unchanged. It starts with the first message and stops when the plugin is disabled. |
 | `color_scheme` | `"dark"`: while the plugin is enabled, pages are told the user prefers dark (`prefers-color-scheme: dark`) and Wisp's own UI turns dark. `dark-mode` uses it so sites show their own dark theme. |
 | `sync_prefixes` | Title prefixes of synced entries this plugin may read and write. |
 
@@ -85,14 +90,28 @@ await wisp.storage.set(key, val) // persisted to ~/.local/share/wisp/plugin-data
 await wisp.storage.remove(key)
 await wisp.storage.keys()
 await wisp.tabs.open(url)        // "tabs": open an http(s) URL in a background tab
+await wisp.tabs.current()        // "tabs": { id, url, title } of the current tab
+await wisp.runtime.sendMessage(msg)  // to the background script; resolves to its handler's answer
+wisp.onMessage(async (msg) => answer) // background: answer messages (the first non-undefined answer wins)
+await wisp.runtime.broadcast(msg)    // background: to the plugin's open pages ("broadcast" event)
+await wisp.native.post(msg)      // "native": to the helper (started if needed); replies arrive as "native" events
+await wisp.native.close()        // stop the helper ("native-disconnect" event when it's gone)
+await wisp.action.setBadge(text) // up to 4 characters on the plugin's toolbar button(s); "" clears it
+await wisp.downloads.start(url)  // "downloads": download an http(s) URL (the user picks where)
+await wisp.cookies.netscape(url) // "cookies": that site's cookies as cookies.txt text
+await wisp.openPath(path)        // "native": open a file or folder with the system's apps
 await wisp.notify(title, body)   // "notifications": desktop notification
 await wisp.log(...parts)         // prints to Wisp's stdout, no permission needed
 
 await wisp.session.get/set/remove/keys(...)  // like storage, but memory only; cleared on exit
 
 wisp.on("action", ({ id, url, title }) => { ... })  // a toolbar action was used on this page
-wisp.on("context-menu", ({ id }) => { ... })         // a context_menu entry was chosen;
-                                                     // listen for "contextmenu" events to know on what
+wisp.on("context-menu", (info) => { ... })  // a context_menu entry was chosen (see the table);
+                                            // in page scripts, listen for "contextmenu" events to know on what
+wisp.on("media", ({ tabId, url, mime, size, pageUrl }) => { ... })  // background, "media": a page loaded video/audio
+wisp.on("tab-updated", ({ tabId, url }) => { ... })  // background, "tabs": a tab went to a new page
+wisp.on("tab-closed", ({ tabId }) => { ... })
+wisp.browser.gpuCompositing      // true when pages are composited on the GPU
 
 // "sync": encrypted xBrowserSync entries, limited to your sync_prefixes
 await wisp.sync.list(prefix?)    // [{ id, title, name, url, description, tags }]; name = title minus prefix
@@ -137,7 +156,8 @@ reach it, and calls can't claim to come from a different plugin.
 | `passwords` | Use sync, session storage, a context menu and isolated-world form filling |
 | `fingerprint-shield` | Use a page-world script at `document_start` |
 | `cookie-banner-hider` | Use CSS only |
-| `dark-mode` | Use CSS, disabled by default |
+| `dark-mode` | Use CSS and `color_scheme`, disabled by default |
+| `vidgrab` | Use a background script, a native helper, a popup, badges, media events and context menus (a port of a Firefox add-on) |
 
 ## Debugging
 

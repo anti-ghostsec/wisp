@@ -60,6 +60,10 @@ pub struct Config {
 
     /// Plugin id -> enabled. Plugins not listed use their manifest default.
     pub plugins: BTreeMap<String, bool>,
+    /// Plugin ids in the order their toolbar buttons appear (others after).
+    pub plugin_order: Vec<String>,
+    /// Plugins whose buttons are kept out of the toolbar (still in the ☰ menu).
+    pub toolbar_hidden: Vec<String>,
 }
 
 impl Default for Config {
@@ -88,6 +92,8 @@ impl Default for Config {
             save_history: false,
             restore_tabs: false,
             plugins: BTreeMap::new(),
+            plugin_order: Vec::new(),
+            toolbar_hidden: Vec::new(),
         }
     }
 }

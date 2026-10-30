@@ -1,7 +1,13 @@
-html.wisp-dark {
+/* Two ways of darkening, chosen by dark.js:
+   - .wisp-dark-overlay (GPU compositing, the default): an overlay inverts
+     everything beneath it with backdrop-filter. Pictures and video carry
+     an inverting filter of their own, so they come out normal.
+   - .wisp-dark alone (software rendering, where backdrop-filter isn't
+     drawn): the page itself is inverted and pictures inverted back. */
+html.wisp-dark:not(.wisp-dark-overlay) {
   filter: invert(0.92) hue-rotate(180deg) !important;
   background: #fff !important;
 }
-html.wisp-dark :is(img, video, picture, canvas, iframe, svg image, [style*="background-image"]) {
+html.wisp-dark :is(img, video, canvas, svg image, iframe, embed, object, [data-wisp-bg], [style*="background-image"]) {
   filter: invert(1) hue-rotate(180deg) !important;
 }

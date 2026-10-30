@@ -3,7 +3,26 @@
 // removed, and it's checked again whenever the site switches theme.
 (() => {
   const root = () => document.documentElement;
-  const darken = (on) => root()?.classList.toggle("wisp-dark", on);
+  // With GPU compositing, an element on its own GPU layer (video, animated
+  // pictures) ignores its own filter under an inverted page, so the page is
+  // darkened by an overlay instead (see dark.css).
+  const overlayMode = !!wisp.browser?.gpuCompositing;
+  let overlay = null;
+  const darken = (on) => {
+    const r = root();
+    if (!r) return;
+    r.classList.toggle("wisp-dark", on);
+    r.classList.toggle("wisp-dark-overlay", on && overlayMode);
+    if (!overlayMode) return;
+    if (on && !overlay) {
+      overlay = document.createElement("wisp-dark-overlay");
+      const style = { position: "fixed", inset: "0", "z-index": "2147483647", "pointer-events": "none", display: "block",
+        "backdrop-filter": "invert(0.92) hue-rotate(180deg)" };
+      for (const [k, v] of Object.entries(style)) overlay.style.setProperty(k, v, "important");
+    }
+    if (on && !overlay.isConnected) r.appendChild(overlay);
+    if (!on) overlay?.remove();
+  };
 
   // Relative luminance of a CSS color, or null if it's (nearly) transparent.
   const luminance = (color) => {
@@ -46,6 +65,38 @@
     darken(false);
     darken(!alreadyDark());
   };
+
+  // Pictures set as CSS backgrounds by a stylesheet (posters, thumbnails)
+  // can't be matched by CSS alone: mark them so dark.css inverts them back.
+  const markBackgrounds = (scope) => {
+    if (!root()?.classList.contains("wisp-dark")) return;
+    const els = scope.querySelectorAll ? [scope, ...scope.querySelectorAll("*")] : [];
+    for (const el of els) {
+      if (!(el instanceof Element) || el.hasAttribute("data-wisp-bg") || el === root() || el === document.body) continue;
+      if (/url\(/.test(getComputedStyle(el).backgroundImage)) el.setAttribute("data-wisp-bg", "");
+    }
+  };
+  let pending = [];
+  let scanQueued = false;
+  const scanSoon = (nodes) => {
+    pending.push(...nodes);
+    if (scanQueued) return;
+    scanQueued = true;
+    setTimeout(() => {
+      scanQueued = false;
+      const batch = pending;
+      pending = [];
+      for (const n of batch) if (n.isConnected) markBackgrounds(n);
+    }, 300);
+  };
+  addEventListener("DOMContentLoaded", () => {
+    scanSoon([document.documentElement]);
+    new MutationObserver((records) => {
+      const added = records.flatMap((r) => [...r.addedNodes]).filter((n) => n.nodeType === 1);
+      if (added.length) scanSoon(added);
+    }).observe(document.documentElement, { childList: true, subtree: true });
+  });
+  addEventListener("load", () => scanSoon([document.documentElement]));
 
   if (root()) darken(true);
   else new MutationObserver((_, o) => root() && (darken(true), o.disconnect())).observe(document, { childList: true });

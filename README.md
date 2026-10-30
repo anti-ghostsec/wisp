@@ -184,4 +184,17 @@ misspelled setting names) before saving. Restart Wisp (Ctrl+Q) to apply.
 
 ## Plugins
 
-See [PLUGINS.md](PLUGINS.md).
+Turn plugins on and off in the ☰ menu. Drag a plugin by its ⠿ handle to
+change where its buttons sit in the toolbar, and untick **Toolbar** to keep
+its buttons out of the toolbar (they then appear next to it in the menu).
+
+**VidGrab** downloads videos from YouTube and the 1000+ other sites
+[yt-dlp](https://github.com/yt-dlp/yt-dlp) supports: use its toolbar
+button, or right-click a page, video or link. On other sites it spots the
+video streams a page plays (start the video first). The first time, click
+**Install yt-dlp** in its popup; it needs `python3`, and `ffmpeg` for HD
+video and MP3 (`sudo apt install ffmpeg`). When a site asks for a login,
+yt-dlp gets your cookies for that site in a private temporary file that's
+deleted when the download ends.
+
+See [PLUGINS.md](PLUGINS.md) to write your own.

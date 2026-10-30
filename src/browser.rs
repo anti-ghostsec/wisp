@@ -70,6 +70,41 @@ impl PluginUi for UiBridge {
             }
         }
     }
+
+    fn hidden_view(&self) -> WebView {
+        let shared = self.0.upgrade().expect("plugins outlive the browser");
+        let view = shared.new_web_view(None);
+        shared.views.borrow_mut().push(view.downgrade());
+        view
+    }
+
+    fn views(&self) -> Vec<WebView> {
+        self.0.upgrade().map(|s| s.views.borrow().iter().filter_map(|w| w.upgrade()).collect()).unwrap_or_default()
+    }
+
+    fn current_tab(&self) -> serde_json::Value {
+        let tab = self.0.upgrade().and_then(|s| s.last_window()).and_then(|w| w.current_tab());
+        match tab {
+            Some(t) => serde_json::json!({ "id": t.id, "url": *t.uri.borrow(), "title": *t.title.borrow() }),
+            None => serde_json::Value::Null,
+        }
+    }
+
+    fn download(&self, url: &str) {
+        if let Some(shared) = self.0.upgrade() {
+            shared.session.download_uri(url);
+        }
+    }
+
+    fn open_path(&self, path: &std::path::Path) -> bool {
+        match self.0.upgrade().and_then(|s| s.last_window()) {
+            Some(win) => {
+                win.open_path(path);
+                true
+            }
+            None => crate::launch::open(path),
+        }
+    }
 }
 
 impl Shared {
@@ -80,7 +115,7 @@ impl Shared {
         let ucm = UserContentManager::new();
         let sync = Sync::new();
         sync.warm_up();
-        let plugins = PluginHost::new(&cfg, &ucm, sync.clone());
+        let plugins = PluginHost::new(&cfg, &ucm, sync.clone(), &session);
         let shared = Rc::new(Shared {
             app: app.clone(),
             config: RefCell::new(cfg),
@@ -108,12 +143,50 @@ impl Shared {
             }
         });
         shared.plugins.set_ui(Rc::new(UiBridge(Rc::downgrade(&shared))));
+        shared.plugins.sync_backgrounds();
         shared.register_scheme();
         shared.install_accels();
         install_css();
         shared.install_plugin_accels();
         shared.apply_color_scheme();
         shared
+    }
+
+    /// A web view with Wisp's session, settings and plugins, sharing the web
+    /// process of `related` (or of the other tabs, when that's configured).
+    fn new_web_view(&self, related: Option<&WebView>) -> WebView {
+        let anchor = related.cloned().or_else(|| if self.config.borrow().shared_web_process { self.anchor_view() } else { None });
+        match &anchor {
+            // The builder does not inherit the content manager from the related
+            // view (only webkit_web_view_new_with_related_view does), so pass it
+            // explicitly or plugins silently miss every tab but the first.
+            Some(r) => WebView::builder()
+                .related_view(r)
+                .user_content_manager(&self.ucm)
+                .settings(&self.settings)
+                .build(),
+            None => WebView::builder()
+                .network_session(&self.session)
+                .web_context(&self.context)
+                .user_content_manager(&self.ucm)
+                .settings(&self.settings)
+                .build(),
+        }
+    }
+
+    /// All plugins in the user's order (☰ menu); ones never placed keep
+    /// their discovery order after the rest.
+    fn ordered_plugins(&self) -> Vec<Rc<plugins::Plugin>> {
+        let order = self.config.borrow().plugin_order.clone();
+        let mut list = self.plugins.plugins.clone();
+        list.sort_by_key(|p| order.iter().position(|id| *id == p.manifest.id).unwrap_or(usize::MAX));
+        list
+    }
+
+    fn rebuild_plugin_bars(&self) {
+        for win in self.windows.borrow().iter() {
+            win.rebuild_plugin_bar();
+        }
     }
 
     /// Save the open tabs shortly (when restoring tabs is on).
@@ -237,6 +310,12 @@ impl Shared {
             let rest = rest.split(['?', '#']).next().unwrap_or("");
             let (id, path) = rest.split_once('/').unwrap_or((rest, ""));
             let path = if path.is_empty() { "index.html" } else { path };
+            if path == plugins::BACKGROUND_PAGE && shared.plugins.get(id).is_some_and(|p| p.enabled.get() && p.has_background()) {
+                let html = glib::Bytes::from_static(b"<!doctype html><meta charset=utf-8><title>background</title>");
+                let len = html.len() as i64;
+                req.finish(&gio::MemoryInputStream::from_bytes(&html), len, Some("text/html"));
+                return;
+            }
             let file = shared.plugins.page_file(id, path);
             match file.as_ref().and_then(|f| std::fs::read(f).ok()) {
                 Some(data) => {
@@ -336,6 +415,8 @@ impl Shared {
 }
 
 pub struct Tab {
+    /// Unique for the run; plugins see it as tabId.
+    id: u64,
     page: gtk::Box,
     /// The tab's button in the tab strip.
     header: gtk::Box,
@@ -375,8 +456,9 @@ pub struct BrowserWindow {
     /// The bar plus its » menu; what gets shown and hidden.
     bookmarks_row: gtk::Box,
     bookmarks_scroll: gtk::ScrolledWindow,
-    /// (button, name, url) of each bookmark on the bar, for the » menu.
-    bookmark_items: RefCell<Vec<(gtk::Button, String, String)>>,
+    bookmarks_overflow: gtk::MenuButton,
+    /// (widget, id, name, url) of each bookmark on the bar, for the » menu.
+    bookmark_items: RefCell<Vec<(gtk::Widget, i64, String, String)>>,
     popup_bar: gtk::Revealer,
     popup_label: gtk::Label,
     /// (url, opener site) of the last blocked pop-up.
@@ -522,11 +604,18 @@ impl BrowserWindow {
             .tooltip_text("More bookmarks")
             .has_frame(false)
             .popover(&overflow_popover)
-            .visible(false)
+            .opacity(0.0)
+            .can_target(false)
             .build();
+        // Only faded in and out: showing and hiding it would change the
+        // room left for bookmarks, which can flip whether they fit, forever.
         let adj = bookmarks_scroll.hadjustment();
         let o = overflow.clone();
-        adj.connect_changed(move |a| o.set_visible(a.upper() > a.page_size() + 1.0));
+        adj.connect_changed(move |a| {
+            let needed = a.upper() > a.page_size() + 1.0;
+            o.set_opacity(if needed { 1.0 } else { 0.0 });
+            o.set_can_target(needed);
+        });
         let bookmarks_row = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
             .visible(shared.config.borrow().show_bookmarks_bar)
@@ -566,6 +655,7 @@ impl BrowserWindow {
             bookmarks_bar,
             bookmarks_row,
             bookmarks_scroll,
+            bookmarks_overflow: overflow.clone(),
             bookmark_items: RefCell::new(Vec::new()),
             popup_bar,
             popup_label,
@@ -581,6 +671,25 @@ impl BrowserWindow {
                 p.set_child(Some(&win.hidden_bookmarks_list(p)));
             }
         });
+        // Dragging a bookmark over » opens it, to drop inside; dropping on »
+        // itself moves the bookmark to the end.
+        let target = gtk::DropTarget::new(glib::Type::STRING, gdk::DragAction::MOVE);
+        let o = overflow.clone();
+        target.connect_enter(move |_, _, _| {
+            o.popup();
+            gdk::DragAction::MOVE
+        });
+        let w = Rc::downgrade(&win);
+        target.connect_drop(move |_, value, _, _| {
+            let (Some(win), Some(moved)) = (w.upgrade(), dragged_bookmark(value)) else { return false };
+            let last = win.bookmark_items.borrow().last().map(|(_, id, _, _)| *id);
+            match last {
+                Some(last) if last != moved => win.move_bookmark(moved, last, true),
+                _ => {}
+            }
+            true
+        });
+        overflow.add_controller(target);
         shared.windows.borrow_mut().push(win.clone());
         let w = Rc::downgrade(&win);
         win.window.connect_close_request(move |_| {
@@ -797,6 +906,10 @@ impl BrowserWindow {
             self.new_tab(Some(&p.page_url(page)), None, true);
             return;
         }
+        if let Some(page) = &action.popup {
+            self.show_plugin_popup(&p, page, &format!("{plugin_id}/{action_id}"));
+            return;
+        }
         let Some(tab) = self.current_tab() else { return };
         let view = self.view_of(&tab);
         let data = serde_json::json!({
@@ -813,26 +926,17 @@ impl BrowserWindow {
         while let Some(child) = self.plugin_bar.first_child() {
             self.plugin_bar.remove(&child);
         }
-        for p in self.shared.plugins.enabled() {
+        let hidden = self.shared.config.borrow().toolbar_hidden.clone();
+        for p in self.shared.ordered_plugins().iter().filter(|p| p.enabled.get() && !hidden.contains(&p.manifest.id)) {
             for a in &p.manifest.actions {
                 let tooltip = match &a.shortcut {
                     Some(s) => format!("{} ({})", a.label, shortcut_label(s)),
                     None => a.label.clone(),
                 };
-                let button = gtk::Button::builder().tooltip_text(&tooltip).build();
-                match &a.icon {
-                    // An SVG shipped with the plugin, drawn in the theme's text color.
-                    Some(icon) if icon.ends_with(".svg") => {
-                        match p.file(icon).and_then(|f| std::fs::read_to_string(f).ok()).and_then(|svg| icons::from_svg(&svg)) {
-                            Some(image) => button.set_child(Some(&image)),
-                            None => button.set_label(&a.label),
-                        }
-                    }
-                    Some(icon) => button.set_icon_name(icon),
-                    None => button.set_label(&a.label),
+                let button = plugin_action_button(p, a, &tooltip);
+                if let Some(text) = self.shared.plugins.badge(&p.manifest.id) {
+                    add_badge(&button, &text);
                 }
-                button.set_action_name(Some("win.plugin-action"));
-                button.set_action_target_value(Some(&format!("{}/{}", p.manifest.id, a.id).to_variant()));
                 self.plugin_bar.append(&button);
             }
         }
@@ -1036,32 +1140,9 @@ impl BrowserWindow {
 
         let heading = gtk::Label::builder().label("<b>Plugins</b>").use_markup(true).xalign(0.0).build();
         vbox.append(&heading);
-        if shared.plugins.plugins.is_empty() {
-            vbox.append(&gtk::Label::new(Some("No plugins installed")));
-        }
-        for p in &shared.plugins.plugins {
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-            let text = format!("{} {}", p.manifest.name, p.manifest.version);
-            let name = gtk::Label::builder().label(text.trim()).xalign(0.0).hexpand(true).build();
-            name.set_tooltip_text(Some(&p.manifest.description));
-            let switch = gtk::Switch::builder().active(p.enabled.get()).valign(gtk::Align::Center).build();
-            let w = Rc::downgrade(self);
-            let id = p.manifest.id.clone();
-            switch.connect_state_set(move |_, on| {
-                if let Some(win) = w.upgrade() {
-                    let mut cfg = win.shared.config.borrow_mut();
-                    win.shared.plugins.set_enabled(&id, on, &mut cfg);
-                    drop(cfg);
-                    if let Some(v) = win.current_view() {
-                        v.reload();
-                    }
-                }
-                glib::Propagation::Proceed
-            });
-            row.append(&name);
-            row.append(&switch);
-            vbox.append(&row);
-        }
+        let plugin_list = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        self.fill_plugin_list(&plugin_list);
+        vbox.append(&plugin_list);
 
         let install = gtk::Button::with_label("Install plugin…");
         let w = Rc::downgrade(self);
@@ -1116,7 +1197,114 @@ impl BrowserWindow {
 
         let popover = gtk::Popover::new();
         popover.set_child(Some(&vbox));
+        // Other windows may have changed plugins since.
+        let w = Rc::downgrade(self);
+        popover.connect_show(move |_| {
+            if let Some(win) = w.upgrade() {
+                win.fill_plugin_list(&plugin_list);
+            }
+        });
         popover
+    }
+
+    /// The ☰ menu's plugins, in toolbar order: drag ⠿ to reorder, "Toolbar"
+    /// shows or hides a plugin's buttons (hidden ones get them here instead),
+    /// the switch turns the plugin on or off.
+    fn fill_plugin_list(self: &Rc<Self>, list: &gtk::Box) {
+        while let Some(child) = list.first_child() {
+            list.remove(&child);
+        }
+        let plugins = self.shared.ordered_plugins();
+        if plugins.is_empty() {
+            list.append(&gtk::Label::new(Some("No plugins installed")));
+        }
+        let hidden = self.shared.config.borrow().toolbar_hidden.clone();
+        for p in plugins {
+            let id = p.manifest.id.clone();
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            row.add_css_class("wisp-plugin-row");
+            let handle = gtk::Label::builder().label("⠿").css_classes(["dim-label"]).tooltip_text("Drag to change the order of toolbar buttons").build();
+            row.append(&handle);
+            let text = format!("{} {}", p.manifest.name, p.manifest.version);
+            let name = gtk::Label::builder().label(text.trim()).xalign(0.0).hexpand(true).tooltip_text(p.manifest.description.as_str()).build();
+            row.append(&name);
+            if !p.manifest.actions.is_empty() {
+                let in_toolbar = !hidden.contains(&id);
+                if !in_toolbar && p.enabled.get() {
+                    // Kept out of the toolbar: its buttons live here.
+                    for a in &p.manifest.actions {
+                        let b = plugin_action_button(&p, a, &a.label);
+                        b.add_css_class("flat");
+                        row.append(&b);
+                    }
+                }
+                let toolbar = gtk::CheckButton::builder().label("Toolbar").active(in_toolbar).tooltip_text("Show this plugin's buttons in the toolbar").build();
+                let (w, l, pid) = (Rc::downgrade(self), list.clone(), id.clone());
+                toolbar.connect_toggled(move |c| {
+                    let Some(win) = w.upgrade() else { return };
+                    {
+                        let mut cfg = win.shared.config.borrow_mut();
+                        cfg.toolbar_hidden.retain(|x| *x != pid);
+                        if !c.is_active() {
+                            cfg.toolbar_hidden.push(pid.clone());
+                        }
+                        cfg.save();
+                    }
+                    win.shared.rebuild_plugin_bars();
+                    let (win, l) = (win.clone(), l.clone());
+                    glib::idle_add_local_once(move || win.fill_plugin_list(&l));
+                });
+                row.append(&toolbar);
+            }
+            let switch = gtk::Switch::builder().active(p.enabled.get()).valign(gtk::Align::Center).build();
+            let (w, l, pid) = (Rc::downgrade(self), list.clone(), id.clone());
+            switch.connect_state_set(move |_, on| {
+                if let Some(win) = w.upgrade() {
+                    let mut cfg = win.shared.config.borrow_mut();
+                    win.shared.plugins.set_enabled(&pid, on, &mut cfg);
+                    drop(cfg);
+                    if let Some(v) = win.current_view() {
+                        v.reload();
+                    }
+                    let l = l.clone();
+                    glib::idle_add_local_once(move || win.fill_plugin_list(&l));
+                }
+                glib::Propagation::Proceed
+            });
+            row.append(&switch);
+
+            let source = gtk::DragSource::builder().actions(gdk::DragAction::MOVE).build();
+            let (r, drag_id) = (row.clone(), id.clone());
+            source.connect_prepare(move |source, _, _| {
+                source.set_icon(Some(&gtk::WidgetPaintable::new(Some(&r))), 0, 0);
+                Some(gdk::ContentProvider::for_value(&format!("wisp-plugin:{drag_id}").to_value()))
+            });
+            handle.add_controller(source);
+            let target = gtk::DropTarget::new(glib::Type::STRING, gdk::DragAction::MOVE);
+            let (w, l, r, target_id) = (Rc::downgrade(self), list.clone(), row.clone(), id.clone());
+            target.connect_drop(move |_, value, _, y| {
+                let Some(win) = w.upgrade() else { return false };
+                let Some(moved) = value.get::<String>().ok().and_then(|v| v.strip_prefix("wisp-plugin:").map(str::to_string)) else {
+                    return false;
+                };
+                let mut order: Vec<String> = win.shared.ordered_plugins().iter().map(|p| p.manifest.id.clone()).collect();
+                order.retain(|x| *x != moved);
+                let at = order.iter().position(|x| *x == target_id).unwrap_or(order.len());
+                let at = if y > r.height() as f64 / 2.0 { at + 1 } else { at };
+                order.insert(at.min(order.len()), moved);
+                {
+                    let mut cfg = win.shared.config.borrow_mut();
+                    cfg.plugin_order = order;
+                    cfg.save();
+                }
+                win.shared.rebuild_plugin_bars();
+                let l = l.clone();
+                glib::idle_add_local_once(move || win.fill_plugin_list(&l));
+                true
+            });
+            row.add_controller(target);
+            list.append(&row);
+        }
     }
 
     // ---- tabs ----
@@ -1141,6 +1329,7 @@ impl BrowserWindow {
         let tab_header = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         tab_header.add_css_class("wisp-tab");
         let tab = Rc::new(Tab {
+            id: next_tab_id(),
             page: page.clone(),
             header: tab_header.clone(),
             label: label.clone(),
@@ -1228,25 +1417,7 @@ impl BrowserWindow {
 
     fn create_view(self: &Rc<Self>, tab: &Rc<Tab>, related: Option<&WebView>) -> WebView {
         let shared = &self.shared;
-        let anchor = related.cloned().or_else(|| {
-            if shared.config.borrow().shared_web_process { shared.anchor_view() } else { None }
-        });
-        let view = match &anchor {
-            // The builder does not inherit the content manager from the related
-            // view (only webkit_web_view_new_with_related_view does), so pass it
-            // explicitly or plugins silently miss every tab but the first.
-            Some(r) => WebView::builder()
-                .related_view(r)
-                .user_content_manager(&shared.ucm)
-                .settings(&shared.settings)
-                .build(),
-            None => WebView::builder()
-                .network_session(&shared.session)
-                .web_context(&shared.context)
-                .user_content_manager(&shared.ucm)
-                .settings(&shared.settings)
-                .build(),
-        };
+        let view = shared.new_web_view(related);
         view.set_vexpand(true);
         shared.views.borrow_mut().push(view.downgrade());
         self.connect_view(tab, &view);
@@ -1256,6 +1427,27 @@ impl BrowserWindow {
     }
 
     fn connect_view(self: &Rc<Self>, tab: &Rc<Tab>, view: &WebView) {
+        // Video and audio the page loads, for plugins that asked ("media").
+        let (w, t) = (Rc::downgrade(self), Rc::downgrade(tab));
+        view.connect_resource_load_started(move |v, resource, _| {
+            let Some(win) = w.upgrade() else { return };
+            if !win.shared.plugins.wants_media() {
+                return;
+            }
+            let (w, t, page) = (w.clone(), t.clone(), v.uri().map(|u| u.to_string()));
+            resource.connect_response_notify(move |r| {
+                let (Some(win), Some(tab), Some(res)) = (w.upgrade(), t.upgrade(), r.response()) else { return };
+                let url = res.uri().map(|u| u.to_string()).unwrap_or_default();
+                let mime = res.mime_type().map(|m| m.to_string()).unwrap_or_default();
+                if is_media(&url, &mime) {
+                    let data = serde_json::json!({
+                        "tabId": tab.id, "url": url, "mime": mime,
+                        "size": res.content_length(), "pageUrl": page,
+                    });
+                    win.shared.plugins.media_event(&data);
+                }
+            });
+        });
         let w = Rc::downgrade(self);
         view.connect_context_menu(move |view, menu, hit| {
             if let Some(win) = w.upgrade() {
@@ -1328,6 +1520,8 @@ impl BrowserWindow {
                         *tab.upgraded_from.borrow_mut() = None;
                     }
                     win.shared.save_session_soon();
+                    let data = serde_json::json!({ "tabId": tab.id, "url": v.uri().map(|u| u.to_string()) });
+                    win.shared.plugins.tab_event("tab-updated", &data);
                 }
                 LoadEvent::Finished => {
                     if win.shared.config.borrow().save_history {
@@ -1513,6 +1707,7 @@ impl BrowserWindow {
         }
         self.strip.remove(&tab.header);
         self.shared.save_session_soon();
+        self.shared.plugins.tab_event("tab-closed", &serde_json::json!({ "tabId": tab.id }));
         self.tabs.borrow_mut().retain(|t| !Rc::ptr_eq(t, tab));
         tab.view.borrow_mut().take();
         if self.tabs.borrow().is_empty() {
@@ -1522,6 +1717,62 @@ impl BrowserWindow {
     }
 
     /// Right-click menu entries of enabled plugins.
+    /// A plugin page in a popover under its toolbar button, sized to fit
+    /// its content (re-measured while open, as lists in it grow).
+    fn show_plugin_popup(self: &Rc<Self>, p: &plugins::Plugin, page: &str, target: &str) {
+        // The button for this action, or the plugin bar when it isn't in the toolbar.
+        let mut anchor: gtk::Widget = self.plugin_bar.clone().upcast();
+        let mut child = self.plugin_bar.first_child();
+        while let Some(c) = child {
+            if c.downcast_ref::<gtk::Button>().and_then(|b| b.action_target_value()).and_then(|v| v.get::<String>()).as_deref() == Some(target) {
+                anchor = c.clone();
+            }
+            child = c.next_sibling();
+        }
+        let view = self.shared.new_web_view(None);
+        self.shared.views.borrow_mut().push(view.downgrade());
+        view.set_size_request(380, 300);
+        let popover = gtk::Popover::builder().child(&view).build();
+        popover.set_parent(&anchor);
+        let tab = self.current_tab().map_or(0, |t| t.id);
+        view.load_uri(&format!("{}?tab={tab}", p.page_url(page)));
+
+        let fit = |v: &WebView| {
+            let v = v.clone();
+            let js = "JSON.stringify([document.documentElement.scrollWidth, document.documentElement.scrollHeight])";
+            v.clone().evaluate_javascript(js, None, None, None::<&gio::Cancellable>, move |res| {
+                let size: Option<(i32, i32)> = res.ok().and_then(|r| r.to_str().as_str().parse::<serde_json::Value>().ok()).and_then(|j| {
+                    let s: String = serde_json::from_value(j).ok()?;
+                    serde_json::from_str(&s).ok()
+                });
+                if let Some((w, h)) = size {
+                    v.set_size_request(w.clamp(260, 800), h.clamp(80, 600));
+                }
+            });
+        };
+        view.connect_load_changed(move |v, e| {
+            if e == LoadEvent::Finished {
+                fit(v);
+            }
+        });
+        let (v, po) = (view.clone(), popover.clone());
+        glib::timeout_add_local(Duration::from_millis(700), move || {
+            if !po.is_visible() {
+                return glib::ControlFlow::Break;
+            }
+            fit(&v);
+            glib::ControlFlow::Continue
+        });
+        // window.close() in the page closes the popup.
+        let po = popover.clone();
+        view.connect_close(move |_| po.popdown());
+        popover.connect_closed(|p| {
+            let p = p.clone();
+            glib::idle_add_local_once(move || p.unparent());
+        });
+        popover.popup();
+    }
+
     fn add_plugin_menu_items(&self, view: &WebView, menu: &webkit6::ContextMenu, hit: &webkit6::HitTestResult) {
         let mut separated = false;
         for p in self.shared.plugins.enabled() {
@@ -1529,6 +1780,7 @@ impl BrowserWindow {
                 let fits = item.contexts.iter().any(|c| match c.as_str() {
                     "editable" => hit.context_is_editable(),
                     "link" => hit.context_is_link(),
+                    "media" => hit.context_is_media(),
                     "selection" => hit.context_is_selection(),
                     "page" => true,
                     _ => false,
@@ -1541,9 +1793,23 @@ impl BrowserWindow {
                     separated = true;
                 }
                 let action = gio::SimpleAction::new(&format!("{}-{}", p.manifest.id, item.id), None);
+                let tab = self.tabs.borrow().iter().find(|t| t.view.borrow().as_ref() == Some(view)).map_or(0, |t| t.id);
+                let text = |s: Option<glib::GString>| s.map(|s| s.to_string());
+                let data = serde_json::json!({
+                    "id": item.id,
+                    "tabId": tab,
+                    "pageUrl": text(view.uri()),
+                    "pageTitle": text(view.title()),
+                    "linkUrl": text(hit.link_uri()),
+                    "mediaUrl": text(hit.media_uri()),
+                });
                 let (view, world) = (view.downgrade(), p.world());
-                let data = serde_json::json!({ "id": item.id });
+                let (plugins, plugin) = (self.shared.plugins.clone(), p.clone());
                 action.connect_activate(move |_, _| {
+                    // A plugin with a background script handles it there.
+                    if plugins.emit_to_background(&plugin, "context-menu", &data) {
+                        return;
+                    }
                     let Some(view) = view.upgrade() else { return };
                     let js = format!("globalThis.wisp && wisp._emit('context-menu', {data});");
                     view.evaluate_javascript(&js, Some(&world), None, None::<&gio::Cancellable>, |_| {});
@@ -1634,12 +1900,16 @@ impl BrowserWindow {
     }
 
     /// For testing: save the window as a PNG after `delay`, then quit.
-    /// Bookmarks as buttons under the address bar, in their saved order: click
-    /// opens in this tab, middle-click in a new one, drag to reorder,
-    /// right-click for more.
+    /// Bookmarks under the address bar, in their saved order: click opens in
+    /// this tab, middle-click in a new one, drag to reorder (also to and from
+    /// the » menu), right-click for more.
     fn rebuild_bookmarks_bar(self: &Rc<Self>) {
         while let Some(child) = self.bookmarks_bar.first_child() {
             self.bookmarks_bar.remove(&child);
+        }
+        // Its list would be out of date.
+        if let Some(p) = self.bookmarks_overflow.popover() {
+            p.popdown();
         }
         self.bookmark_items.borrow_mut().clear();
         let marks = self.shared.sync.cached("b_");
@@ -1648,39 +1918,139 @@ impl BrowserWindow {
             self.bookmarks_bar.append(&hint);
         }
         for b in marks {
+            let Some(id) = b["id"].as_i64() else { continue };
             let url = b["url"].as_str().unwrap_or("").to_string();
             let name = b["name"].as_str().filter(|n| !n.trim().is_empty()).unwrap_or(&url).trim().to_string();
-            // Never narrower than the name (up to 22 characters), so names
-            // can't be squeezed down to "…".
-            let label = gtk::Label::builder()
-                .label(name.as_str())
-                .ellipsize(gtk::pango::EllipsizeMode::End)
-                .width_chars(name.chars().count().min(22) as i32)
-                .max_width_chars(22)
-                .build();
-            let button = gtk::Button::builder().child(&label).tooltip_text(format!("{name}\n{url}")).css_classes(["flat"]).build();
-            let (w, u) = (Rc::downgrade(self), url.clone());
-            button.connect_clicked(move |_| {
-                let Some(win) = w.upgrade() else { return };
-                if let Some(tab) = win.current_tab() {
-                    win.navigate(&tab, &u);
+            let item = self.bookmark_widget(id, &name, &url, false, None);
+            self.bookmarks_bar.append(&item);
+            self.bookmark_items.borrow_mut().push((item.upcast(), id, name, url));
+        }
+    }
+
+    /// One bookmark, on the bar (`vertical` false) or in the » menu. A plain
+    /// box with its own gestures rather than a GtkButton, whose click
+    /// handling can keep hold of a press that started a page load and then
+    /// refuse drags.
+    fn bookmark_widget(self: &Rc<Self>, id: i64, name: &str, url: &str, vertical: bool, popover: Option<&gtk::Popover>) -> gtk::Box {
+        let chars = name.chars().count().min(if vertical { 50 } else { 22 }) as i32;
+        // Never narrower than the name (up to a limit), so it can't be
+        // squeezed down to "…".
+        let label = gtk::Label::builder()
+            .label(name)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .width_chars(chars)
+            .max_width_chars(chars)
+            .xalign(0.0)
+            .build();
+        let item = gtk::Box::builder().css_classes(["wisp-bookmark"]).tooltip_text(format!("{name}\n{url}")).build();
+        item.append(&label);
+
+        let click = gtk::GestureClick::builder().button(0).build();
+        let (w, u, p) = (Rc::downgrade(self), url.to_string(), popover.cloned());
+        click.connect_released(move |g, _, _, _| {
+            let Some(win) = w.upgrade() else { return };
+            match g.current_button() {
+                1 => {
+                    if let Some(p) = &p {
+                        p.popdown();
+                    }
+                    if let Some(tab) = win.current_tab() {
+                        win.navigate(&tab, &u);
+                        win.view_of(&tab).grab_focus();
+                    }
                 }
-            });
-            let middle = gtk::GestureClick::builder().button(2).build();
-            let (w, u) = (Rc::downgrade(self), url);
-            middle.connect_released(move |_, _, _, _| {
-                if let Some(win) = w.upgrade() {
+                2 => {
                     win.new_tab(Some(&u), None, false);
                 }
-            });
-            button.add_controller(middle);
-            if let Some(id) = b["id"].as_i64() {
-                self.make_bookmark_movable(&button, id, &b["url"]);
+                _ => {}
             }
-            self.bookmarks_bar.append(&button);
-            let url = b["url"].as_str().unwrap_or("").to_string();
-            self.bookmark_items.borrow_mut().push((button, name, url));
+        });
+        item.add_controller(click);
+
+        let source = gtk::DragSource::builder().actions(gdk::DragAction::MOVE).build();
+        let it = item.clone();
+        source.connect_prepare(move |source, _, _| {
+            source.set_icon(Some(&gtk::WidgetPaintable::new(Some(&it))), 0, 0);
+            Some(gdk::ContentProvider::for_value(&format!("wisp-bookmark:{id}").to_value()))
+        });
+        item.add_controller(source);
+
+        let target = gtk::DropTarget::new(glib::Type::STRING, gdk::DragAction::MOVE);
+        let (w, it) = (Rc::downgrade(self), item.clone());
+        target.connect_drop(move |_, value, x, y| {
+            let (Some(win), Some(moved)) = (w.upgrade(), dragged_bookmark(value)) else { return false };
+            // The far half of the item: place after it.
+            let after = if vertical { y > it.height() as f64 / 2.0 } else { x > it.width() as f64 / 2.0 };
+            win.move_bookmark(moved, id, after);
+            true
+        });
+        item.add_controller(target);
+
+        let menu = gtk::GestureClick::builder().button(3).build();
+        let (w, it, url) = (Rc::downgrade(self), item.clone(), url.to_string());
+        menu.connect_pressed(move |_, _, _, _| {
+            if let Some(win) = w.upgrade() {
+                win.bookmark_menu(&it, id, &url);
+            }
+        });
+        item.add_controller(menu);
+        item
+    }
+
+    fn move_bookmark(self: &Rc<Self>, id: i64, target: i64, after: bool) {
+        if let Some(p) = self.bookmarks_overflow.popover() {
+            p.popdown();
         }
+        let sync = self.shared.sync.clone();
+        glib::spawn_future_local(async move {
+            if let Err(e) = sync.move_entry(id, target, after, &["b_".to_string()]).await {
+                eprintln!("wisp: moving bookmark: {e}");
+            }
+        });
+    }
+
+    fn bookmark_menu(self: &Rc<Self>, anchor: &gtk::Box, id: i64, url: &str) {
+        let popover = gtk::Popover::new();
+        popover.set_parent(anchor);
+        let items = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        let open = gtk::Button::builder().label("Open in new tab").css_classes(["flat"]).build();
+        let manage = gtk::Button::builder().label("Manage bookmarks…").css_classes(["flat"]).build();
+        let delete = gtk::Button::builder().label("Delete").css_classes(["flat"]).build();
+        for item in [&open, &manage, &delete] {
+            item.child().and_then(|c| c.downcast::<gtk::Label>().ok()).inspect(|l| l.set_xalign(0.0));
+            items.append(item);
+        }
+        popover.set_child(Some(&items));
+        let (w, u, p) = (Rc::downgrade(self), url.to_string(), popover.clone());
+        open.connect_clicked(move |_| {
+            p.popdown();
+            if let Some(win) = w.upgrade() {
+                win.new_tab(Some(&u), None, false);
+            }
+        });
+        let (w, p) = (Rc::downgrade(self), popover.clone());
+        manage.connect_clicked(move |_| {
+            p.popdown();
+            if let Some(win) = w.upgrade() {
+                win.run_plugin_action("bookmarks", "list");
+            }
+        });
+        let (sync, p) = (self.shared.sync.clone(), popover.clone());
+        delete.connect_clicked(move |_| {
+            p.popdown();
+            let sync = sync.clone();
+            glib::spawn_future_local(async move {
+                if let Err(e) = sync.remove(id, &["b_".to_string()]).await {
+                    eprintln!("wisp: deleting bookmark: {e}");
+                }
+            });
+        });
+        // Unparent once closed, so rebuilding the bar can't leak it.
+        popover.connect_closed(|p| {
+            let p = p.clone();
+            glib::idle_add_local_once(move || p.unparent());
+        });
+        popover.popup();
     }
 
     /// The » menu: bookmarks that are scrolled out of view on the bar.
@@ -1688,107 +2058,22 @@ impl BrowserWindow {
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let adj = self.bookmarks_scroll.hadjustment();
         let (left, right) = (adj.value(), adj.value() + adj.page_size());
-        for (button, name, url) in self.bookmark_items.borrow().iter() {
-            let Some(b) = button.compute_bounds(&self.bookmarks_bar) else { continue };
+        let items = self.bookmark_items.borrow().clone();
+        for (widget, id, name, url) in items {
+            let Some(b) = widget.compute_bounds(&self.bookmarks_bar) else { continue };
             if (b.x() as f64) >= left - 1.0 && (b.x() + b.width()) as f64 <= right + 1.0 {
                 continue;
             }
-            let label = gtk::Label::builder().label(name.as_str()).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).max_width_chars(40).build();
-            let item = gtk::Button::builder().child(&label).tooltip_text(url.as_str()).css_classes(["flat"]).build();
-            let (w, u, p) = (Rc::downgrade(self), url.clone(), popover.clone());
-            item.connect_clicked(move |_| {
-                p.popdown();
-                if let Some(win) = w.upgrade() {
-                    if let Some(tab) = win.current_tab() {
-                        win.navigate(&tab, &u);
-                    }
-                }
-            });
-            list.append(&item);
+            list.append(&self.bookmark_widget(id, &name, &url, true, Some(popover)));
         }
-        let scroll = gtk::ScrolledWindow::builder()
+        gtk::ScrolledWindow::builder()
             .child(&list)
             .hscrollbar_policy(gtk::PolicyType::Never)
             .propagate_natural_height(true)
+            .propagate_natural_width(true)
             .max_content_height(500)
-            .build();
-        scroll.upcast()
-    }
-
-    fn make_bookmark_movable(self: &Rc<Self>, button: &gtk::Button, id: i64, url: &serde_json::Value) {
-        let source = gtk::DragSource::builder().actions(gdk::DragAction::MOVE).build();
-        let b = button.clone();
-        source.connect_prepare(move |source, _, _| {
-            source.set_icon(Some(&gtk::WidgetPaintable::new(Some(&b))), 0, 0);
-            Some(gdk::ContentProvider::for_value(&format!("wisp-bookmark:{id}").to_value()))
-        });
-        button.add_controller(source);
-
-        let target = gtk::DropTarget::new(glib::Type::STRING, gdk::DragAction::MOVE);
-        let (sync, b) = (self.shared.sync.clone(), button.clone());
-        target.connect_drop(move |_, value, x, _| {
-            let Some(moved) = value.get::<String>().ok().and_then(|v| v.strip_prefix("wisp-bookmark:")?.parse::<i64>().ok()) else {
-                return false;
-            };
-            // Dropped on the right half: place after this one.
-            let after = x > b.width() as f64 / 2.0;
-            let sync = sync.clone();
-            glib::spawn_future_local(async move {
-                if let Err(e) = sync.move_entry(moved, id, after, &["b_".to_string()]).await {
-                    eprintln!("wisp: moving bookmark: {e}");
-                }
-            });
-            true
-        });
-        button.add_controller(target);
-
-        let menu = gtk::GestureClick::builder().button(3).build();
-        let (w, b, url) = (Rc::downgrade(self), button.clone(), url.as_str().unwrap_or("").to_string());
-        menu.connect_pressed(move |_, _, _, _| {
-            let Some(win) = w.upgrade() else { return };
-            let popover = gtk::Popover::new();
-            popover.set_parent(&b);
-            let items = gtk::Box::new(gtk::Orientation::Vertical, 2);
-            let open = gtk::Button::builder().label("Open in new tab").css_classes(["flat"]).build();
-            let manage = gtk::Button::builder().label("Manage bookmarks…").css_classes(["flat"]).build();
-            let delete = gtk::Button::builder().label("Delete").css_classes(["flat"]).build();
-            for item in [&open, &manage, &delete] {
-                item.child().and_then(|c| c.downcast::<gtk::Label>().ok()).inspect(|l| l.set_xalign(0.0));
-                items.append(item);
-            }
-            popover.set_child(Some(&items));
-            let (w2, u, p) = (Rc::downgrade(&win), url.clone(), popover.clone());
-            open.connect_clicked(move |_| {
-                p.popdown();
-                if let Some(win) = w2.upgrade() {
-                    win.new_tab(Some(&u), None, false);
-                }
-            });
-            let (w2, p) = (Rc::downgrade(&win), popover.clone());
-            manage.connect_clicked(move |_| {
-                p.popdown();
-                if let Some(win) = w2.upgrade() {
-                    win.run_plugin_action("bookmarks", "list");
-                }
-            });
-            let (sync, p) = (win.shared.sync.clone(), popover.clone());
-            delete.connect_clicked(move |_| {
-                p.popdown();
-                let sync = sync.clone();
-                glib::spawn_future_local(async move {
-                    if let Err(e) = sync.remove(id, &["b_".to_string()]).await {
-                        eprintln!("wisp: deleting bookmark: {e}");
-                    }
-                });
-            });
-            // Unparent once closed, so rebuilding the bar can't leak it.
-            popover.connect_closed(|p| {
-                let p = p.clone();
-                glib::idle_add_local_once(move || p.unparent());
-            });
-            popover.popup();
-        });
-        button.add_controller(menu);
+            .build()
+            .upcast()
     }
 
     fn refresh_downloads(self: &Rc<Self>) {
@@ -2029,13 +2314,49 @@ fn install_css() {
          .wisp-new-tab { min-height: 26px; min-width: 26px; padding: 0; }
          .wisp-downloads { padding: 4px; }
          .wisp-bookmarks { padding: 0 4px 3px 4px; }
-         .wisp-bookmarks button { padding: 2px 8px; min-height: 24px; font-size: 0.95em; }
+         .wisp-bookmarks button { padding: 2px 8px; min-height: 24px; }
+         .wisp-plugin-row { padding: 2px 0; }
+         .wisp-badge { background: #3584e4; color: white; border-radius: 7px; font-size: 0.65em; font-weight: bold;
+                       padding: 0 3px; min-width: 8px; margin: -5px -7px 0 0; }
+         .wisp-plugin-row > label:first-child { padding: 0 2px; }
+         .wisp-bookmark { padding: 4px 8px; border-radius: 5px; font-size: 0.95em; }
+         .wisp-bookmark:hover { background: alpha(currentColor, 0.1); }
          .wisp-dl-row > button { padding: 6px 8px; border-radius: 6px; }
          .wisp-dl-name { font-weight: 500; }
          .wisp-dl-status { font-size: 0.85em; }
          .wisp-downloads progressbar trough, .wisp-downloads progressbar progress { min-height: 3px; }",
     );
     gtk::style_context_add_provider_for_display(&display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+}
+
+/// A toolbar-style button for a plugin action.
+fn plugin_action_button(p: &plugins::Plugin, a: &plugins::Action, tooltip: &str) -> gtk::Button {
+    let button = gtk::Button::builder().tooltip_text(tooltip).build();
+    match &a.icon {
+        // An SVG shipped with the plugin, drawn in the theme's text color.
+        Some(icon) if icon.ends_with(".svg") => {
+            match p.file(icon).and_then(|f| std::fs::read_to_string(f).ok()).and_then(|svg| icons::from_svg(&svg)) {
+                Some(image) => button.set_child(Some(&image)),
+                None => button.set_label(&a.label),
+            }
+        }
+        Some(icon) => button.set_icon_name(icon),
+        None => button.set_label(&a.label),
+    }
+    button.set_action_name(Some("win.plugin-action"));
+    button.set_action_target_value(Some(&format!("{}/{}", p.manifest.id, a.id).to_variant()));
+    button
+}
+
+/// A small count or dot over a toolbar button's corner.
+fn add_badge(button: &gtk::Button, text: &str) {
+    let Some(icon) = button.child() else { return };
+    button.set_child(None::<&gtk::Widget>);
+    let overlay = gtk::Overlay::builder().child(&icon).build();
+    let badge = gtk::Label::builder().label(text).css_classes(["wisp-badge"]).halign(gtk::Align::End).valign(gtk::Align::Start).build();
+    badge.set_can_target(false);
+    overlay.add_overlay(&badge);
+    button.set_child(Some(&overlay));
 }
 
 fn icon_button(icon: &str, tooltip: &str, action: &str) -> gtk::Button {
@@ -2105,6 +2426,29 @@ fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()>
         }
     }
     Ok(())
+}
+
+/// Video, audio or a streaming playlist, by type or file extension.
+fn is_media(url: &str, mime: &str) -> bool {
+    let mime = mime.to_ascii_lowercase();
+    if mime.starts_with("video/") || mime.starts_with("audio/") || mime.contains("mpegurl") || mime.contains("dash+xml") {
+        return true;
+    }
+    let path = url.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase();
+    [".m3u8", ".mpd", ".mp4", ".webm", ".mkv", ".mov", ".m4v", ".mp3", ".m4a", ".ogg", ".opus", ".flac"]
+        .iter()
+        .any(|ext| path.ends_with(ext))
+}
+
+fn next_tab_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The bookmark id carried by a drag, if it is one.
+fn dragged_bookmark(value: &glib::Value) -> Option<i64> {
+    value.get::<String>().ok()?.strip_prefix("wisp-bookmark:")?.parse().ok()
 }
 
 fn is_cancellation(error: &glib::Error) -> bool {

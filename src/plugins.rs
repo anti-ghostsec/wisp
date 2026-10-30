@@ -7,13 +7,16 @@
 //!   * user style sheets (CSS);
 //!   * content-blocker rule lists: WebKit JSON files shipped with the plugin, or
 //!     Adblock Plus/EasyList lists downloaded and converted (see adblock.rs);
-//!   * toolbar actions (buttons + shortcuts) and pages served at
-//!     `wisp-plugin://<id>/<file>`.
+//!   * toolbar actions (buttons + shortcuts, optionally opening a popup page)
+//!     and pages served at `wisp-plugin://<id>/<file>`;
+//!   * a background script that runs while the plugin is enabled, which
+//!     pages message, and which can talk to a native helper program.
 //!
 //! See PLUGINS.md for the format and API.
 
 use crate::adblock;
 use crate::config::{self, Config};
+use crate::native::NativePort;
 use crate::sync::Sync;
 use serde::Deserialize;
 use serde_json::{Map, Value as Json, json};
@@ -27,13 +30,16 @@ use std::time::{Duration, SystemTime};
 use webkit6::glib::translate::IntoGlib;
 use webkit6::javascriptcore;
 use webkit6::soup::prelude::*;
+use webkit6::prelude::*;
 use webkit6::{
-    ScriptMessageReply, UserContentFilter, UserContentFilterStore, UserContentInjectedFrames,
+    NetworkSession, ScriptMessageReply, WebView, UserContentFilter, UserContentFilterStore, UserContentInjectedFrames,
     UserContentManager, UserScript, UserScriptInjectionTime, UserStyleLevel, UserStyleSheet,
 };
-use webkit6::{glib, soup};
+use webkit6::{gio, glib, soup};
 
 pub const PAGE_SCHEME: &str = "wisp-plugin";
+/// The (empty) page background scripts run in: wisp-plugin://<id>/_background.html
+pub const BACKGROUND_PAGE: &str = "_background.html";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Manifest {
@@ -61,6 +67,14 @@ pub struct Manifest {
     pub actions: Vec<Action>,
     #[serde(default)]
     pub context_menu: Vec<MenuItem>,
+    /// Scripts run in a hidden page for as long as the plugin is enabled.
+    #[serde(default)]
+    pub background: Vec<String>,
+    /// A helper program the background talks to (needs "native"): the
+    /// command and its arguments; arguments naming files in the plugin folder
+    /// become full paths.
+    #[serde(default)]
+    pub native: Vec<String>,
     /// "dark": while enabled, pages are told the user prefers a dark color
     /// scheme (`prefers-color-scheme: dark`), and the browser UI turns dark.
     #[serde(default)]
@@ -73,7 +87,8 @@ pub struct Manifest {
 pub struct MenuItem {
     pub id: String,
     pub label: String,
-    /// Where it shows: "editable" (text fields), "link", "selection" or "page" (always).
+    /// Where it shows: "editable" (text fields), "link", "media" (video and
+    /// audio), "selection" or "page" (always).
     #[serde(default = "page_context")]
     pub contexts: Vec<String>,
 }
@@ -137,6 +152,10 @@ pub struct Action {
     /// Open this plugin page in a new tab instead of messaging the plugin.
     #[serde(default)]
     pub page: Option<String>,
+    /// Show this plugin page in a popup under the button, as browser
+    /// extensions do. It gets `?tab=<id>` of the current tab.
+    #[serde(default)]
+    pub popup: Option<String>,
 }
 
 fn yes() -> bool {
@@ -171,6 +190,10 @@ impl Plugin {
         format!("wisp_{}", self.key())
     }
 
+    pub fn has_background(&self) -> bool {
+        !self.manifest.background.is_empty()
+    }
+
     pub fn page_url(&self, page: &str) -> String {
         format!("{PAGE_SCHEME}://{}/{}", self.manifest.id, page.trim_start_matches('/'))
     }
@@ -202,8 +225,18 @@ impl Plugin {
 pub trait PluginUi {
     fn open_tab(&self, url: &str);
     fn notify(&self, title: &str, body: &str);
-    /// Plugins were enabled/disabled: refresh toolbars.
+    /// Plugins were enabled/disabled (or a badge changed): refresh toolbars.
     fn plugins_changed(&self);
+    /// A web view that isn't shown anywhere, for background pages.
+    fn hidden_view(&self) -> WebView;
+    /// Every open web view (tabs and popups).
+    fn views(&self) -> Vec<WebView>;
+    /// { id, url, title } of the current tab.
+    fn current_tab(&self) -> Json;
+    /// Start a download (the user picks where it goes, as usual).
+    fn download(&self, url: &str);
+    /// Open a file or folder with the system's app for it.
+    fn open_path(&self, path: &Path) -> bool;
 }
 
 pub struct PluginHost {
@@ -217,6 +250,15 @@ pub struct PluginHost {
     sync: Rc<Sync>,
     http: soup::Session,
     ui: RefCell<Option<Rc<dyn PluginUi>>>,
+    /// Pages are composited on the GPU (see configure_rendering).
+    gpu_compositing: bool,
+    network: NetworkSession,
+    /// Background pages of enabled plugins, by plugin id.
+    backgrounds: RefCell<HashMap<String, WebView>>,
+    /// Running native helpers, by plugin id.
+    natives: RefCell<HashMap<String, Rc<NativePort>>>,
+    /// Toolbar badge text, by plugin id.
+    badges: RefCell<HashMap<String, String>>,
 }
 
 /// Directories searched for plugins, in priority order (first id wins).
@@ -258,7 +300,7 @@ fn discover(cfg: &Config) -> Vec<Rc<Plugin>> {
 }
 
 /// Runs first in each plugin's isolated world and defines the `wisp` API object.
-fn api_prelude(p: &Plugin) -> String {
+fn api_prelude(p: &Plugin, gpu_compositing: bool) -> String {
     let meta = json!({
         "id": p.manifest.id,
         "name": p.manifest.name,
@@ -272,6 +314,7 @@ fn api_prelude(p: &Plugin) -> String {
     ? handler.postMessage({{ op, args }})
     : Promise.reject(new Error("wisp API unavailable"));
   const listeners = {{}};
+  const handlers = [];
   const store = (prefix) => Object.freeze({{
     get: (key) => call(prefix + ".get", {{ key }}),
     set: (key, value) => call(prefix + ".set", {{ key, value }}),
@@ -280,6 +323,7 @@ fn api_prelude(p: &Plugin) -> String {
   }});
   globalThis.wisp = Object.freeze({{
     plugin: Object.freeze({meta}),
+    browser: Object.freeze({{ gpuCompositing: {gpu_compositing} }}),
     storage: store("storage"),
     session: store("session"),
     sync: Object.freeze({{
@@ -290,10 +334,35 @@ fn api_prelude(p: &Plugin) -> String {
       move: (id, target, after = false) => call("sync.move", {{ id, target, after }}),
       status: () => call("sync.status"),
     }}),
-    tabs: Object.freeze({{ open: (url) => call("tabs.open", {{ url }}) }}),
+    runtime: Object.freeze({{
+      // To the background script; resolves to what its handler returns.
+      sendMessage: (message) => call("runtime.send", {{ message }}),
+      // From the background script to the plugin's open pages ("broadcast" event).
+      broadcast: (message) => call("runtime.broadcast", {{ message }}),
+    }}),
+    onMessage: (fn) => {{ handlers.push(fn); }},
+    native: Object.freeze({{
+      post: (message) => call("native.post", {{ message }}),
+      close: () => call("native.close"),
+    }}),
+    action: Object.freeze({{ setBadge: (text) => call("action.badge", {{ text: String(text || "") }}) }}),
+    downloads: Object.freeze({{ start: (url) => call("downloads.start", {{ url }}) }}),
+    cookies: Object.freeze({{ netscape: (url) => call("cookies.netscape", {{ url }}) }}),
+    openPath: (path) => call("open.path", {{ path }}),
+    tabs: Object.freeze({{
+      open: (url) => call("tabs.open", {{ url }}),
+      current: () => call("tabs.current"),
+    }}),
     notify: (title, body = "") => call("notify", {{ title, body }}),
     log: (...parts) => call("log", {{ message: parts.map(String).join(" ") }}),
     on: (type, fn) => {{ (listeners[type] = listeners[type] || []).push(fn); }},
+    _handle: async (message) => {{
+      for (const fn of handlers) {{
+        const r = await fn(message);
+        if (r !== undefined) return r;
+      }}
+      return null;
+    }},
     _emit: (type, data) => {{
       for (const fn of listeners[type] || []) {{
         try {{ fn(data); }} catch (e) {{ console.error(e); }}
@@ -306,7 +375,7 @@ fn api_prelude(p: &Plugin) -> String {
 }
 
 impl PluginHost {
-    pub fn new(cfg: &Config, ucm: &UserContentManager, sync: Rc<Sync>) -> Rc<PluginHost> {
+    pub fn new(cfg: &Config, ucm: &UserContentManager, sync: Rc<Sync>, session: &NetworkSession) -> Rc<PluginHost> {
         let store_dir = config::cache_dir().join("content-filters");
         let _ = fs::create_dir_all(&store_dir);
         let http = soup::Session::new();
@@ -321,6 +390,11 @@ impl PluginHost {
             sync,
             http,
             ui: RefCell::new(None),
+            gpu_compositing: cfg.gpu_compositing || cfg.hardware_acceleration,
+            network: session.clone(),
+            backgrounds: RefCell::new(HashMap::new()),
+            natives: RefCell::new(HashMap::new()),
+            badges: RefCell::new(HashMap::new()),
         });
         for p in &host.plugins {
             host.register_handler(p);
@@ -378,6 +452,7 @@ impl PluginHost {
             cfg.plugins.insert(id.to_string(), enabled);
             cfg.save();
             self.apply();
+            self.sync_backgrounds();
             if let Some(ui) = self.ui.borrow().clone() {
                 ui.plugins_changed();
             }
@@ -401,16 +476,7 @@ impl PluginHost {
             let block: Vec<&str> = cs.exclude_matches.iter().map(String::as_str).collect();
 
             if cs.world == World::Isolated && !cs.js.is_empty() && !prelude_added {
-                // Inject the API at document start, everywhere the plugin could run.
-                let prelude = UserScript::for_world(
-                    &api_prelude(p),
-                    UserContentInjectedFrames::AllFrames,
-                    UserScriptInjectionTime::Start,
-                    &world,
-                    &[],
-                    &[],
-                );
-                self.ucm.add_script(&prelude);
+                self.add_prelude(p);
                 prelude_added = true;
             }
             for file in &cs.js {
@@ -428,7 +494,130 @@ impl PluginHost {
                 self.ucm.add_style_sheet(&sheet);
             }
         }
+        if p.has_background() {
+            if !prelude_added {
+                self.add_prelude(p);
+            }
+            let page = p.page_url(BACKGROUND_PAGE);
+            for file in &p.manifest.background {
+                let Some(src) = p.read(file) else { continue };
+                let src = format!("{src}\n//# sourceURL={}", p.page_url(file));
+                let script = UserScript::for_world(
+                    &src,
+                    UserContentInjectedFrames::TopFrame,
+                    UserScriptInjectionTime::End,
+                    &world,
+                    &[page.as_str()],
+                    &[],
+                );
+                self.ucm.add_script(&script);
+            }
+        }
         self.install_filters(p);
+    }
+
+    /// The `wisp` API, injected at document start everywhere the plugin's
+    /// scripts could run.
+    fn add_prelude(&self, p: &Plugin) {
+        let prelude = UserScript::for_world(
+            &api_prelude(p, self.gpu_compositing),
+            UserContentInjectedFrames::AllFrames,
+            UserScriptInjectionTime::Start,
+            &p.world(),
+            &[],
+            &[],
+        );
+        self.ucm.add_script(&prelude);
+    }
+
+    // ---- background pages, native helpers, events ----
+
+    /// Start background pages of enabled plugins and stop those of disabled ones.
+    pub fn sync_backgrounds(self: &Rc<Self>) {
+        let Some(ui) = self.ui.borrow().clone() else { return };
+        for p in &self.plugins {
+            let id = &p.manifest.id;
+            let want = p.enabled.get() && p.has_background();
+            let running = self.backgrounds.borrow().contains_key(id);
+            if want && !running {
+                let view = ui.hidden_view();
+                view.load_uri(&p.page_url(BACKGROUND_PAGE));
+                self.backgrounds.borrow_mut().insert(id.clone(), view);
+            } else if !want && running {
+                self.backgrounds.borrow_mut().remove(id);
+                if let Some(port) = self.natives.borrow_mut().remove(id) {
+                    port.close();
+                }
+                self.badges.borrow_mut().remove(id);
+            }
+        }
+    }
+
+    pub fn badge(&self, plugin: &str) -> Option<String> {
+        self.badges.borrow().get(plugin).cloned().filter(|b| !b.is_empty())
+    }
+
+    /// Run `wisp._emit(kind, data)` in the plugin's background page.
+    pub fn emit_to_background(&self, plugin: &Plugin, kind: &str, data: &Json) -> bool {
+        let Some(view) = self.backgrounds.borrow().get(&plugin.manifest.id).cloned() else { return false };
+        emit(&view, plugin, kind, data);
+        true
+    }
+
+    /// Video and audio a page loads, for plugins with the "media" permission.
+    pub fn wants_media(&self) -> bool {
+        self.enabled().any(|p| p.has_background() && p.has_permission("media"))
+    }
+
+    pub fn media_event(&self, data: &Json) {
+        for p in self.enabled().filter(|p| p.has_permission("media")) {
+            self.emit_to_background(p, "media", data);
+        }
+    }
+
+    /// "tab-updated" { tabId, url } and "tab-closed" { tabId }, for
+    /// background pages with the "tabs" permission.
+    pub fn tab_event(&self, kind: &str, data: &Json) {
+        for p in self.enabled().filter(|p| p.has_permission("tabs")) {
+            self.emit_to_background(p, kind, data);
+        }
+    }
+
+    fn native_port(self: &Rc<Self>, p: &Rc<Plugin>) -> Result<Rc<NativePort>, String> {
+        if let Some(port) = self.natives.borrow().get(&p.manifest.id) {
+            return Ok(port.clone());
+        }
+        if p.manifest.native.is_empty() {
+            return Err(format!("plugin '{}' declares no native helper", p.manifest.id));
+        }
+        // Files of the plugin become full paths; anything else (python3) is
+        // looked up on PATH.
+        let argv: Vec<std::ffi::OsString> = p
+            .manifest
+            .native
+            .iter()
+            .map(|a| p.file(a).filter(|f| f.is_file()).map(|f| f.into_os_string()).unwrap_or_else(|| a.into()))
+            .collect();
+        let (weak, plugin) = (Rc::downgrade(self), p.clone());
+        let on_message = move |msg: Json| {
+            if let Some(host) = weak.upgrade() {
+                host.emit_to_background(&plugin, "native", &msg);
+            }
+        };
+        let (weak, plugin) = (Rc::downgrade(self), p.clone());
+        let started = std::time::Instant::now();
+        let on_exit = move |reason: String| {
+            let Some(host) = weak.upgrade() else { return };
+            // Only forget it if it's still the current one.
+            let current = host.natives.borrow().get(&plugin.manifest.id).is_some_and(|port| port.started == started);
+            if current {
+                host.natives.borrow_mut().remove(&plugin.manifest.id);
+            }
+            host.emit_to_background(&plugin, "native-disconnect", &json!({ "error": reason }));
+        };
+        let port = NativePort::spawn(&argv, &p.dir, started, on_message, on_exit)?;
+        self.natives.borrow_mut().insert(p.manifest.id.clone(), port.clone());
+        Ok(port)
     }
 
     // ---- content blocking ----
@@ -583,7 +772,7 @@ impl PluginHost {
         });
     }
 
-    async fn dispatch(&self, p: &Plugin, op: &str, args: &Json) -> Result<Json, String> {
+    async fn dispatch(self: &Rc<Self>, p: &Rc<Plugin>, op: &str, args: &Json) -> Result<Json, String> {
         let need = |perm: &str| {
             if p.has_permission(perm) {
                 Ok(())
@@ -640,6 +829,79 @@ impl PluginHost {
                     ui.open_tab(url);
                 }
                 Ok(Json::Null)
+            }
+            ("tabs", "current") => {
+                need("tabs")?;
+                Ok(self.ui.borrow().as_ref().map(|ui| ui.current_tab()).unwrap_or(Json::Null))
+            }
+            ("runtime", "send") => {
+                let view = self.backgrounds.borrow().get(&p.manifest.id).cloned();
+                let view = view.ok_or_else(|| format!("plugin '{}' has no background script running", p.manifest.id))?;
+                let dict = glib::VariantDict::new(None);
+                dict.insert("m", args["message"].to_string());
+                let value = view
+                    .call_async_javascript_function_future(
+                        "return await globalThis.wisp._handle(JSON.parse(m));",
+                        Some(&dict.end()),
+                        Some(&p.world()),
+                        None,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(value.to_json(0).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Json::Null))
+            }
+            ("runtime", "broadcast") => {
+                let prefix = p.page_url("");
+                if let Some(ui) = self.ui.borrow().clone() {
+                    for view in ui.views().iter().filter(|v| v.uri().is_some_and(|u| u.starts_with(&prefix))) {
+                        emit(view, p, "broadcast", &args["message"]);
+                    }
+                }
+                Ok(Json::Null)
+            }
+            ("native", "post") => {
+                need("native")?;
+                self.native_port(p)?.post(&args["message"])?;
+                Ok(Json::Null)
+            }
+            ("native", "close") => {
+                if let Some(port) = self.natives.borrow_mut().remove(&p.manifest.id) {
+                    port.close();
+                }
+                Ok(Json::Null)
+            }
+            ("action", "badge") => {
+                let text: String = args["text"].as_str().unwrap_or("").chars().take(4).collect();
+                let old = self.badges.borrow_mut().insert(p.manifest.id.clone(), text.clone());
+                if old.as_deref() != Some(&text) {
+                    if let Some(ui) = self.ui.borrow().clone() {
+                        ui.plugins_changed();
+                    }
+                }
+                Ok(Json::Null)
+            }
+            ("downloads", "start") => {
+                need("downloads")?;
+                let url = args["url"].as_str().filter(|u| u.starts_with("https://") || u.starts_with("http://"));
+                let url = url.ok_or("downloads.start only accepts http(s) URLs")?;
+                if let Some(ui) = self.ui.borrow().clone() {
+                    ui.download(url);
+                }
+                Ok(Json::Null)
+            }
+            ("cookies", "netscape") => {
+                need("cookies")?;
+                let url = args["url"].as_str().filter(|u| u.starts_with("https://") || u.starts_with("http://"));
+                let url = url.ok_or("cookies.netscape only accepts http(s) URLs")?;
+                let manager = self.network.cookie_manager().ok_or("no cookie store")?;
+                let mut cookies = manager.cookies_future(url).await.map_err(|e| e.to_string())?;
+                Ok(Json::String(netscape_cookies(&mut cookies)))
+            }
+            ("open", "path") => {
+                need("native")?;
+                let path = args["path"].as_str().ok_or("missing \"path\"")?;
+                let path = if path.is_empty() { crate::downloads::default_dir() } else { PathBuf::from(path) };
+                Ok(json!(self.ui.borrow().as_ref().is_some_and(|ui| ui.open_path(&path))))
             }
             ("notify", _) => {
                 need("notifications")?;
@@ -757,6 +1019,30 @@ impl PluginHost {
         *m = updated;
         Ok(())
     }
+}
+
+/// `wisp._emit(kind, data)` in a view, in the plugin's world.
+fn emit(view: &WebView, p: &Plugin, kind: &str, data: &Json) {
+    let js = format!("globalThis.wisp && wisp._emit({}, {data});", Json::from(kind));
+    view.evaluate_javascript(&js, Some(&p.world()), None, None::<&gio::Cancellable>, |_| {});
+}
+
+/// Cookies in the cookies.txt format curl and yt-dlp read.
+fn netscape_cookies(cookies: &mut [soup::Cookie]) -> String {
+    let mut out = String::from("# Netscape HTTP Cookie File\n");
+    for c in cookies {
+        let domain = c.domain().map(|d| d.to_string()).unwrap_or_default();
+        let expires = c.expires().map(|d| d.to_unix()).unwrap_or(0);
+        out.push_str(&format!(
+            "{domain}\t{}\t{}\t{}\t{expires}\t{}\t{}\n",
+            if domain.starts_with('.') { "TRUE" } else { "FALSE" },
+            c.path().map(|p| p.to_string()).unwrap_or_else(|| "/".into()),
+            if c.is_secure() { "TRUE" } else { "FALSE" },
+            c.name().map(|n| n.to_string()).unwrap_or_default(),
+            c.value().map(|v| v.to_string()).unwrap_or_default(),
+        ));
+    }
+    out
 }
 
 fn load_map(path: &Path) -> Map<String, Json> {

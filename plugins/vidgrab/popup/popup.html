@@ -1,0 +1,53 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>VidGrab</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <img src="../icons/icon.svg" alt="" width="20" height="20">
+    <h1>VidGrab</h1>
+    <span id="host-badge" class="pill">…</span>
+    <button id="settings" class="icon" title="Settings">⚙</button>
+  </header>
+
+  <section id="setup" hidden>
+    <p><strong>yt-dlp isn't set up yet.</strong> VidGrab hands downloads to yt-dlp, which is updated whenever sites change.</p>
+    <p class="muted" id="setup-error"></p>
+    <p><button id="install" class="primary">Install yt-dlp</button> <button id="retry">Check again</button></p>
+    <p class="muted" id="install-output"></p>
+    <p class="muted">The helper needs <code>python3</code>. For HD video and MP3 you also need ffmpeg: <code>sudo apt install ffmpeg</code></p>
+  </section>
+
+  <section id="main">
+    <div class="page">
+      <div id="page-title" class="title"></div>
+      <div id="page-url" class="muted url"></div>
+    </div>
+    <div class="row">
+      <select id="preset"></select>
+      <button id="download" class="primary">Download</button>
+    </div>
+  </section>
+
+  <section id="media-section" hidden>
+    <h2>Detected media streams</h2>
+    <ul id="media"></ul>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <h2>Downloads</h2>
+      <button id="clear" class="link">Clear finished</button>
+    </div>
+    <ul id="jobs"><li class="muted empty">Nothing yet.</li></ul>
+  </section>
+
+  <footer>
+    <button id="open-folder" class="link">Open download folder</button>
+  </footer>
+
+</body>
+</html>
