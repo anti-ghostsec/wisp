@@ -104,8 +104,9 @@ All optional, from the ☰ menu:
 
 - **Show bookmarks bar** (Ctrl+Shift+B): your bookmarks under the address
   bar. Bookmarks that don't fit are under » at the end (or scroll the bar
-  with the mouse wheel). Click to open, middle-click for a new tab, drag one onto another to
-  move it, right-click to open in a new tab or delete. The bookmarks page
+  with the mouse wheel). Click to open, middle-click for a new tab, drag one
+  along the bar (or within the » menu) to move it, right-click to open it in
+  a new tab, move it to the start or delete it. The bookmarks page
   (Ctrl+Shift+O) lists them in the same order: drag the ⠿ handle to
   reorder, or edit names and addresses. The order syncs with the bookmarks.
 - **Remember history** (off by default): Ctrl+H shows it, grouped by day and

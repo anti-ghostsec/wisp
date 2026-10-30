@@ -63,31 +63,37 @@
       // Reordering a filtered list would be confusing, so only unfiltered.
       const handle = Object.assign(document.createElement("span"), { className: "handle", textContent: "⠿", title: "Drag to move" });
       handle.hidden = !!q;
-      li.draggable = !q;
-      li.ondragstart = (ev) => {
+      // Plain pointer tracking rather than HTML drag-and-drop, which WebKit
+      // routes through the system drag protocol (unreliable with some
+      // window managers).
+      handle.onpointerdown = (ev) => {
+        if (q || ev.button !== 0) return;
+        ev.preventDefault();
+        try { handle.setPointerCapture(ev.pointerId); } catch {}
         dragging = b.id;
-        ev.dataTransfer.effectAllowed = "move";
-        ev.dataTransfer.setData("text/plain", b.url);
         li.classList.add("dragging");
       };
-      li.ondragend = () => { dragging = null; li.classList.remove("dragging"); clearMarks(); };
-      li.ondragover = (ev) => {
-        if (dragging === null || dragging === b.id) return;
-        ev.preventDefault();
-        const r = li.getBoundingClientRect();
+      handle.onpointermove = (ev) => {
+        if (dragging !== b.id) return;
         clearMarks();
-        li.classList.add(ev.clientY > r.top + r.height / 2 ? "over-bottom" : "over-top");
+        const over = document.elementFromPoint(ev.clientX, ev.clientY)?.closest("#list li");
+        if (!over || over === li) return;
+        const r = over.getBoundingClientRect();
+        over.classList.add(ev.clientY > r.top + r.height / 2 ? "over-bottom" : "over-top");
       };
-      li.ondragleave = () => li.classList.remove("over-top", "over-bottom");
-      li.ondrop = (ev) => {
-        ev.preventDefault();
-        const after = li.classList.contains("over-bottom");
+      handle.onpointerup = handle.onpointercancel = () => {
+        if (dragging !== b.id) return;
+        dragging = null;
+        li.classList.remove("dragging");
+        const over = document.querySelector("#list li.over-top, #list li.over-bottom");
+        const after = over?.classList.contains("over-bottom");
         clearMarks();
-        if (dragging !== null && dragging !== b.id) move(dragging, b.id, after);
+        const target = over && Number(over.dataset.id);
+        if (target && target !== b.id) move(b.id, target, after);
       };
+      li.dataset.id = b.id;
       const a = document.createElement("a");
       a.href = b.url;
-      a.draggable = false;
       const name = document.createElement("span");
       name.textContent = b.name || b.url;
       const url = document.createElement("small");
