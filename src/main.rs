@@ -96,6 +96,15 @@ fn main() -> glib::ExitCode {
     app.run()
 }
 
+/// GStreamer's GPU video decoders: VA-API (Intel, AMD) through the `va` and
+/// older `vaapi` plugins, and NVIDIA's NVDEC.
+const HARDWARE_DECODERS: &[&str] = &[
+    "vah264dec", "vah265dec", "vavp8dec", "vavp9dec", "vaav1dec", "vampeg2dec",
+    "vaapih264dec", "vaapih265dec", "vaapivp8dec", "vaapivp9dec", "vaapiav1dec", "vaapimpeg2dec",
+    "vaapidecodebin", "nvh264dec", "nvh265dec", "nvvp8dec", "nvvp9dec", "nvav1dec",
+    "nvmpeg2videodec", "nvh264sldec", "nvh265sldec",
+];
+
 /// Pick the renderer through environment variables, before GTK or WebKit read
 /// them. Variables the user set themselves always win.
 fn configure_rendering(cfg: &config::Config) {
@@ -105,6 +114,11 @@ fn configure_rendering(cfg: &config::Config) {
         // and keep ~100 MB of GPU driver out of the UI process.
         vars.push(("GSK_RENDERER", "cairo".into()));
         vars.push(("WEBKIT_SKIA_ENABLE_CPU_RENDERING", "1".into()));
+        // Video decoded by the CPU too: GStreamer otherwise picks the GPU's
+        // decoder wherever a VA-API or NVDEC driver is installed, and some
+        // drivers hand back damaged frames (green flashes every few seconds).
+        let ranks: Vec<String> = HARDWARE_DECODERS.iter().map(|d| format!("{d}:NONE")).collect();
+        vars.push(("GST_PLUGIN_FEATURE_RANK", ranks.join(",")));
     }
     if cfg.gpu_compositing || cfg.hardware_acceleration {
         // Handing frames to the UI as DMA-BUFs hangs the UI thread on some
