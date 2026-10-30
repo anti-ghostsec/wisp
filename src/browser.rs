@@ -1909,7 +1909,7 @@ impl BrowserWindow {
     }
 
     /// "Open Link" goes (a click does that); "Open Link in New Window"
-    /// becomes "Open Link in New Tab", which opens it in the background so
+    /// becomes "Open in New Tab", which opens it in the background so
     /// you stay where you are while it loads. Likewise for images.
     fn adjust_link_menu(self: &Rc<Self>, menu: &webkit6::ContextMenu, hit: &webkit6::HitTestResult) {
         use webkit6::ContextMenuAction as A;
@@ -1919,7 +1919,7 @@ impl BrowserWindow {
                     menu.remove(item);
                     continue;
                 }
-                A::OpenLinkInNewWindow => ("Open Link in New Tab", hit.link_uri()),
+                A::OpenLinkInNewWindow => ("Open in New Tab", hit.link_uri()),
                 A::OpenImageInNewWindow => ("Open Image in New Tab", hit.image_uri()),
                 _ => continue,
             };

@@ -188,7 +188,7 @@ misspelled setting names) before saving. Restart Wisp (Ctrl+Q) to apply.
 | Ctrl+D / Ctrl+Shift+O | Bookmark page / show bookmarks |
 | + after the last tab, or double-click the empty tab bar | New tab |
 | Drag a tab | Move it; drop it on the bookmarks bar to bookmark it there |
-| Middle-click / Ctrl+click on a link, or right-click → Open Link in New Tab | Open in a background tab (you stay where you are) |
+| Middle-click / Ctrl+click on a link, or right-click → Open in New Tab | Open in a background tab (you stay where you are) |
 
 ## Plugins
 
