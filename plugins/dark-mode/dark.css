@@ -1,0 +1,7 @@
+html.wisp-dark {
+  filter: invert(0.92) hue-rotate(180deg) !important;
+  background: #fff !important;
+}
+html.wisp-dark :is(img, video, picture, canvas, iframe, svg image, [style*="background-image"]) {
+  filter: invert(1) hue-rotate(180deg) !important;
+}

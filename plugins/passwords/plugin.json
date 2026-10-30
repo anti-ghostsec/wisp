@@ -1,0 +1,19 @@
+{
+  "id": "passwords",
+  "name": "Passwords",
+  "version": "1.1",
+  "description": "Saves and fills logins, synced end-to-end encrypted with xBrowserSync (stored as p_ entries). HTTPS sites only.",
+  "permissions": ["sync", "storage", "tabs"],
+  "sync_prefixes": ["p_"],
+  "actions": [
+    { "id": "list", "label": "Saved passwords", "icon": "icons/key-symbolic.svg", "page": "list.html" }
+  ],
+  "context_menu": [
+    { "id": "fill", "label": "Fill saved login…", "contexts": ["editable"] },
+    { "id": "generate", "label": "Generate strong password", "contexts": ["editable"] }
+  ],
+  "content_scripts": [
+    { "matches": ["https://*/*"], "js": ["fill.js"], "run_at": "document_end" },
+    { "matches": ["wisp-plugin://passwords/*"], "js": ["import.js", "list.js"], "run_at": "document_end" }
+  ]
+}

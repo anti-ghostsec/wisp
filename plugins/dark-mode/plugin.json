@@ -1,0 +1,16 @@
+{
+  "id": "dark-mode",
+  "name": "Dark Mode",
+  "version": "1.2",
+  "description": "Asks sites for their dark theme, and darkens light-only pages by inverting their colors.",
+  "enabled_by_default": false,
+  "color_scheme": "dark",
+  "content_scripts": [
+    {
+      "matches": ["*://*/*"],
+      "css": ["dark.css"],
+      "js": ["dark.js"],
+      "run_at": "document_start"
+    }
+  ]
+}

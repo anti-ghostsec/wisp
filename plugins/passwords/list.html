@@ -1,0 +1,44 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Saved passwords</title>
+<style>
+  :root { color-scheme: light dark; --line: #8883; --muted: GrayText; --accent: #3a6ee8; }
+  body { font: 14px system-ui, sans-serif; max-width: 60em; margin: 2em auto; padding: 0 1em; }
+  header { display: flex; gap: .6em; align-items: center; flex-wrap: wrap; }
+  h1 { font-weight: 400; margin: 0; flex: 1; }
+  input { font: inherit; padding: .45em .7em; border-radius: 6px; border: 1px solid #8889; background: Canvas; color: CanvasText; }
+  #q { width: 16em; }
+  button { font: inherit; border: 0; background: none; color: var(--muted); cursor: pointer; padding: .3em .6em; border-radius: 5px; }
+  button:hover { background: var(--line); color: inherit; }
+  button.main { background: var(--accent); color: #fff; }
+  button.main:hover { filter: brightness(1.1); }
+  header button { border: 1px solid #8886; color: inherit; }
+  table { width: 100%; border-collapse: collapse; margin-top: 1em; table-layout: fixed; }
+  td, th { text-align: left; padding: .45em .4em; border-bottom: 1px solid var(--line); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  th { font-weight: 500; color: var(--muted); }
+  th:nth-child(1) { width: 28%; } th:nth-child(2) { width: 26%; } th:nth-child(3) { width: 24%; }
+  td input { width: 100%; box-sizing: border-box; }
+  code { font-size: 1.05em; }
+  .actions { text-align: right; }
+  #status { color: var(--muted); font-size: .9em; }
+  #import-panel { border: 1px solid var(--line); border-radius: 8px; padding: .8em 1em; margin-top: 1em; }
+  #import-panel[hidden] { display: none; }
+  #import-panel p { margin: .3em 0 .7em; }
+  .hint { color: var(--muted); font-size: .9em; }
+</style>
+<header>
+  <h1>Saved passwords</h1>
+  <input id="q" type="search" placeholder="Search" autofocus>
+  <button id="add">Add</button>
+  <button id="import">Import…</button>
+  <input id="file" type="file" accept=".csv,.json,text/csv,application/json" hidden>
+</header>
+<div id="import-panel" hidden>
+  <p id="import-summary"></p>
+  <button id="import-go" class="main">Import</button>
+  <button id="import-cancel">Cancel</button>
+</div>
+<p id="status">Loading…</p>
+<p class="hint" id="import-hint" hidden>Import a CSV or JSON export from Firefox, Chrome, Edge, Brave, Safari, Proton Pass, Bitwarden or KeePassXC.
+In Proton Pass: Settings → Export → CSV (unencrypted).</p>
+<table><thead><tr><th>Site</th><th>Username</th><th>Password</th><th></th></tr></thead><tbody id="rows"></tbody></table>

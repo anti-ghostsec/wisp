@@ -1,0 +1,11 @@
+#onetrust-consent-sdk, #onetrust-banner-sdk, #CybotCookiebotDialog, #CybotCookiebotDialogBodyUnderlay,
+#truste-consent-track, #cookie-law-info-bar, #cookie-notice, #cookieChoiceInfo, #gdpr-cookie-message,
+.cc-window, .cc-banner, .cookie-banner, .cookie-consent, .cookieconsent, .js-cookie-consent,
+#qc-cmp2-container, .qc-cmp2-container, .fc-consent-root, [id^="sp_message_container"],
+.didomi-popup-open #didomi-host, #didomi-host, #usercentrics-root, .osano-cm-window, #iubenda-cs-banner,
+#cmpbox, #cmpbox2, .cmp-container, #consent_blackbar, #termly-code-snippet-support {
+  display: none !important;
+}
+html.didomi-popup-open, body.didomi-popup-open, body.cookie-consent-open, body.modal-open-cookie {
+  overflow: auto !important;
+}

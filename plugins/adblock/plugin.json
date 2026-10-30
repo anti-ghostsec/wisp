@@ -1,0 +1,12 @@
+{
+  "id": "adblock",
+  "name": "Ad & Tracker Blocker",
+  "version": "2.0",
+  "description": "Blocks ads, trackers, pop-unders and redirects to known ad/scam sites using EasyList, EasyPrivacy and uBlock's badware list, compiled into WebKit's native content blocker. Lists refresh every 4 days.",
+  "blocklists": ["rules.json"],
+  "filter_lists": [
+    { "name": "EasyList", "url": "https://easylist.to/easylist/easylist.txt" },
+    { "name": "EasyPrivacy", "url": "https://easylist.to/easylist/easyprivacy.txt" },
+    { "name": "uBlock Badware risks", "url": "https://ublockorigin.github.io/uAssets/filters/badware.txt" }
+  ]
+}

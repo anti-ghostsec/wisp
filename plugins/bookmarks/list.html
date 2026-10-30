@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Bookmarks</title>
+<style>
+  :root { color-scheme: light dark; --muted: #8889; }
+  body { font: 14px system-ui, sans-serif; max-width: 52em; margin: 2em auto; padding: 0 1em; }
+  header { display: flex; gap: 1em; align-items: center; }
+  h1 { font-weight: 400; margin: 0; flex: 1; }
+  input { font: inherit; padding: .5em .8em; border-radius: 6px; border: 1px solid var(--muted); width: 18em; }
+  ul { list-style: none; padding: 0; }
+  li { display: flex; align-items: center; gap: .8em; padding: .55em .4em; border-bottom: 1px solid #8883; }
+  li a { flex: 1; text-decoration: none; color: inherit; overflow: hidden; }
+  li a span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  li a small { color: GrayText; }
+  button { font: inherit; border: 0; background: none; color: GrayText; cursor: pointer; padding: .2em .5em; border-radius: 4px; }
+  button:hover { background: #8883; color: inherit; }
+  header button { border: 1px solid #8886; color: inherit; }
+  #status { color: GrayText; font-size: .9em; }
+</style>
+<header><h1>Bookmarks</h1><input id="q" placeholder="Search bookmarks" autofocus><button id="import" title="Import an HTML bookmarks export from Firefox, Chrome, Edge, Brave or Safari">Import…</button><input id="file" type="file" accept=".html,.htm,.json" hidden></header>
+<p id="status">Loading…</p>
+<ul id="list"></ul>

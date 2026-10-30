@@ -1,0 +1,13 @@
+{
+  "id": "cookie-banner-hider",
+  "name": "Cookie Banner Hider",
+  "version": "1.0",
+  "description": "Hides common cookie-consent banners. Cookies stay governed by Wisp's own policy.",
+  "content_scripts": [
+    {
+      "matches": ["*://*/*"],
+      "css": ["hide.css"],
+      "run_at": "document_start"
+    }
+  ]
+}

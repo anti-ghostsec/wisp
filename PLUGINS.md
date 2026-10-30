@@ -1,0 +1,145 @@
+# Writing Wisp plugins
+
+A plugin is a folder with a `plugin.json` manifest and the files it references.
+Install one with ☰ → **Install plugin…** (pick the plugin's folder), or by
+copying its folder into `~/.local/share/wisp/plugins/`; then restart Wisp
+and toggle it from the menu (☰). Wisp also loads plugins from `$WISP_PLUGIN_PATH`
+(colon-separated), `/usr/share/wisp/plugins` and the `plugins/` folder of the
+source tree.
+
+## Manifest
+
+```json
+{
+  "id": "my-plugin",
+  "name": "My Plugin",
+  "version": "1.0",
+  "description": "Shown as a tooltip in the plugin menu.",
+  "enabled_by_default": true,
+  "permissions": ["storage", "tabs", "notifications", "sync"],
+  "sync_prefixes": ["x_"],
+  "content_scripts": [
+    {
+      "matches": ["*://*/*"],
+      "exclude_matches": ["https://bank.example/*"],
+      "js": ["main.js"],
+      "css": ["style.css"],
+      "run_at": "document_end",
+      "all_frames": false,
+      "world": "isolated"
+    }
+  ],
+  "blocklists": ["rules.json"],
+  "filter_lists": [
+    { "name": "EasyList", "url": "https://easylist.to/easylist/easylist.txt", "refresh_days": 4 }
+  ],
+  "actions": [
+    { "id": "toggle", "label": "Do the thing", "icon": "icons/thing.svg", "shortcut": "<Ctrl>d" },
+    { "id": "list", "label": "Open my page", "icon": "view-list-symbolic", "page": "list.html" }
+  ],
+  "context_menu": [
+    { "id": "insert", "label": "Insert the thing", "contexts": ["editable"] }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | Unique id. The first plugin found with a given id wins. |
+| `enabled_by_default` | Used until the user toggles the plugin. Default `true`. |
+| `permissions` | Which `wisp` API calls are allowed (see below). |
+| `matches` / `exclude_matches` | WebKit URL patterns: `scheme://host/path`, `*` wildcards; `*://` = http and https. Default: all http(s) pages. |
+| `run_at` | `document_start` (before page scripts) or `document_end` (DOM ready). |
+| `all_frames` | Also run inside iframes. |
+| `world` | `isolated` (default) or `page`; see below. |
+| `blocklists` | [WebKit content-blocker](https://webkit.org/blog/3476/content-blockers-first-look/) JSON files. They are compiled to bytecode once and cached, which makes them far cheaper than JS-based blocking. |
+| `filter_lists` | Adblock Plus / EasyList / uBlock lists, downloaded and converted to WebKit rules (network rules only; cosmetic `##` rules and options WebKit can't express are skipped). Refreshed every `refresh_days` days (default 4). |
+| `actions` | Toolbar buttons (with optional shortcut). `icon` is either an `.svg` file in the plugin folder (single-color; its `<path>` shapes are drawn in the theme's text color, 16×16 viewBox) or an icon-theme name. With `page`, the action opens that plugin page in a new tab. Without it, an `action` event goes to the plugin's isolated script on the current page. |
+| `context_menu` | Right-click menu entries. `contexts` says where they show: `editable` (text fields), `link`, `selection` or `page` (everywhere, the default). Choosing one sends a `context-menu` event to the plugin's isolated script on that page. |
+| `color_scheme` | `"dark"`: while the plugin is enabled, pages are told the user prefers dark (`prefers-color-scheme: dark`) and Wisp's own UI turns dark. `dark-mode` uses it so sites show their own dark theme. |
+| `sync_prefixes` | Title prefixes of synced entries this plugin may read and write. |
+
+Plugin pages are files in the plugin folder, served at `wisp-plugin://<id>/<file>`
+while the plugin is enabled. To run code on them, add a content script with
+`"matches": ["wisp-plugin://<id>/*"]`.
+
+Files can only be loaded from inside the plugin's own folder.
+
+## Script worlds
+
+- **`isolated`**: the script shares the page's DOM but has its own JavaScript
+  globals, so the page can't see or tamper with it. Only isolated scripts get
+  the `wisp` API.
+- **`page`**: the script runs in the page's own JavaScript world, so it can
+  override things the page sees (`navigator.*`, prototypes, …). It gets
+  no API. `fingerprint-shield` is an example.
+
+## The `wisp` API (isolated world)
+
+Every call returns a Promise.
+
+```js
+wisp.plugin                      // { id, name, version }
+await wisp.storage.get(key)      // "storage": JSON value or null
+await wisp.storage.set(key, val) // persisted to ~/.local/share/wisp/plugin-data/, 1 MB quota
+await wisp.storage.remove(key)
+await wisp.storage.keys()
+await wisp.tabs.open(url)        // "tabs": open an http(s) URL in a background tab
+await wisp.notify(title, body)   // "notifications": desktop notification
+await wisp.log(...parts)         // prints to Wisp's stdout, no permission needed
+
+await wisp.session.get/set/remove/keys(...)  // like storage, but memory only; cleared on exit
+
+wisp.on("action", ({ id, url, title }) => { ... })  // a toolbar action was used on this page
+wisp.on("context-menu", ({ id }) => { ... })         // a context_menu entry was chosen;
+                                                     // listen for "contextmenu" events to know on what
+
+// "sync": encrypted xBrowserSync entries, limited to your sync_prefixes
+await wisp.sync.list(prefix?)    // [{ id, title, name, url, description, tags }]; name = title minus prefix
+await wisp.sync.add({ title, url, description?, tags? })   // returns the new id
+await wisp.sync.update(id, { title?, url?, description?, tags? })
+await wisp.sync.remove(id)
+await wisp.sync.status()         // { configured, service?, id?, pending? }
+```
+
+### Sync
+
+Wisp includes an [xBrowserSync](https://www.xbrowsersync.org/) client. All
+plugins share one account, and the data is encrypted on this device before
+upload. Each plugin only sees entries whose titles start with one of its
+`sync_prefixes`. The bundled plugins use `b_` for bookmarks and `p_` for
+passwords. If you never set up an account, one is created automatically on
+the official service the first time a plugin saves something. To use your own
+account, or to sync another device, open ☰ → **Sync account…**.
+
+Reads come from an encrypted local copy, refreshed from the service in the
+background about once a minute. Writes apply to that copy straight away
+(so `add` returns the new id at once) and are uploaded shortly after,
+batched together; `status().pending` counts writes not uploaded yet. If
+another device changed the data meanwhile, the writes are replayed on top of
+its version.
+
+Entries are ordinary xBrowserSync bookmarks, so the official xBrowserSync apps
+show them too, including the `p_` entries. Those keep the login in their
+description, readable by anyone who has your sync ID and password.
+
+A call without the matching permission is rejected with an error. Each
+plugin's message channel exists only in its own world, so web pages can't
+reach it, and calls can't claim to come from a different plugin.
+
+## Bundled examples
+
+| Plugin | Shows how to |
+|---|---|
+| `adblock` | Use native blocklists and downloaded filter lists |
+| `bookmarks` | Use toolbar actions, a plugin page and sync |
+| `passwords` | Use sync, session storage, a context menu and isolated-world form filling |
+| `fingerprint-shield` | Use a page-world script at `document_start` |
+| `cookie-banner-hider` | Use CSS only |
+| `dark-mode` | Use CSS, disabled by default |
+
+## Debugging
+
+Press Ctrl+Shift+I to open the Web Inspector. Plugin scripts show up as
+`wisp-plugin://<id>/<file>`. `wisp.log()` output is printed to the terminal
+that started Wisp.
