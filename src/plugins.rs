@@ -65,6 +65,10 @@ pub struct Manifest {
     pub filter_lists: Vec<FilterList>,
     #[serde(default)]
     pub actions: Vec<Action>,
+    /// Whether the actions start out as toolbar buttons; with false they
+    /// sit in the ☰ menu until the user ticks "Toolbar".
+    #[serde(default = "yes")]
+    pub toolbar: bool,
     #[serde(default)]
     pub context_menu: Vec<MenuItem>,
     /// Scripts run in a hidden page for as long as the plugin is enabled.

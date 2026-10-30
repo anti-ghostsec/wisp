@@ -58,6 +58,7 @@ source tree.
 | `blocklists` | [WebKit content-blocker](https://webkit.org/blog/3476/content-blockers-first-look/) JSON files. They are compiled to bytecode once and cached, which makes them far cheaper than JS-based blocking. |
 | `filter_lists` | Adblock Plus / EasyList / uBlock lists, downloaded and converted to WebKit rules (network rules only; cosmetic `##` rules and options WebKit can't express are skipped). Refreshed every `refresh_days` days (default 4). |
 | `actions` | Toolbar buttons (with optional shortcut). With `popup`, the button shows that plugin page in a popup under it, given `?tab=<id>` of the current tab; `window.close()` closes it. `icon` is either an `.svg` file in the plugin folder (single-color; its `<path>` shapes are drawn in the theme's text color, 16×16 viewBox) or an icon-theme name. With `page`, the action opens that plugin page in a new tab. Without it, an `action` event goes to the plugin's isolated script on the current page. |
+| `toolbar` | `false` keeps the actions out of the toolbar at first: they sit next to the plugin in the ☰ menu until the user ticks **Toolbar**. Shortcuts work either way. Default `true`. |
 | `context_menu` | Right-click menu entries. `contexts` says where they show: `editable` (text fields), `link`, `media` (video and audio), `selection` or `page` (everywhere, the default). Choosing one sends a `context-menu` event `{ id, tabId, pageUrl, pageTitle, linkUrl, mediaUrl }` to the plugin's background script if it has one, otherwise to its isolated script on that page. |
 | `background` | Scripts that run in a hidden page (`wisp-plugin://<id>/_background.html`) for as long as the plugin is enabled, like an extension's background page. They have the `wisp` API. |
 | `native` | A helper program the background script talks to (needs `native`): the command and its arguments. Arguments naming files in the plugin folder become full paths; the command is looked up on `PATH`. It speaks the WebExtensions native-messaging format (JSON preceded by a 32-bit little-endian length), so Firefox helpers work unchanged. It starts with the first message and stops when the plugin is disabled. |
@@ -155,6 +156,7 @@ reach it, and calls can't claim to come from a different plugin.
 | `adblock` | Use native blocklists and downloaded filter lists |
 | `bookmarks` | Use toolbar actions, a plugin page and sync |
 | `passwords` | Use sync, session storage, a context menu and isolated-world form filling |
+| `element-blocker` | Use a context menu, `document_start` CSS from storage, a shadow-DOM overlay in the page and a plugin page; starts out of the toolbar |
 | `fingerprint-shield` | Use a page-world script at `document_start` |
 | `cookie-banner-hider` | Use CSS only |
 | `dark-mode` | Use CSS and `color_scheme`, disabled by default |

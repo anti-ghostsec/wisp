@@ -105,8 +105,9 @@ All optional, from the ☰ menu:
 - **Show bookmarks bar** (Ctrl+Shift+B): your bookmarks under the address
   bar. Bookmarks that don't fit are under » at the end (or scroll the bar
   with the mouse wheel). Click to open, middle-click for a new tab, drag one
-  along the bar (or within the » menu) to move it, right-click to open it in
-  a new tab, move it to the start or delete it. The bookmarks page
+  to move it: along the bar, within the » menu, or between the two (hold it
+  over » to open the menu). Right-click to open it in a new tab, move it to
+  the start or delete it. The bookmarks page
   (Ctrl+Shift+O) lists them in the same order: drag the ⠿ handle to
   reorder, or edit names and addresses. The order syncs with the bookmarks.
 - **Remember history** (off by default): Ctrl+H shows it, grouped by day and
@@ -201,5 +202,14 @@ audio separately above 720p), MP3/M4A conversion and embedded metadata;
 without it, VidGrab downloads the best single-file version. When a site asks for a login,
 yt-dlp gets your cookies for that site in a private temporary file that's
 deleted when the download ends.
+
+**Element Blocker** hides things the ad blocker misses, such as a
+newsletter pop-up or a "disable your ad blocker" wall. Nothing is blocked
+until you choose it: right-click the thing and pick **Block element…** (or
+press Ctrl+Shift+E), point at it, and click. Scroll or use ↑ ↓ to select
+the box around it instead, or edit the selector by hand. It stays hidden on
+that site from then on, and if it was an overlay that stopped the page from
+scrolling, scrolling works again. **Blocked elements** (in the ☰ menu)
+lists them by site to edit or remove.
 
 See [PLUGINS.md](PLUGINS.md) to write your own.

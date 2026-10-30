@@ -187,14 +187,28 @@ impl Shared {
         vertical: bool,
         on_drop: impl Fn(gtk::Widget, bool) + 'static,
     ) {
-        let marks = if vertical { ["wisp-drop-above", "wisp-drop-below"] } else { ["wisp-drop-before", "wisp-drop-after"] };
-        let (handle, item, container) =
-            (handle.clone().upcast::<gtk::Widget>(), item.clone().upcast::<gtk::Widget>(), container.clone().upcast::<gtk::Widget>());
+        let zone = DropZone { container: container.clone().upcast(), vertical, area: None };
+        self.reorderable_zones(handle, item, move |_| vec![zone.clone()], on_drop);
+    }
+
+    /// Like `reorderable`, across several containers, which may sit in
+    /// popovers (the bookmarks bar and its » menu). `zones` is asked for
+    /// them on every pointer move, with the pointer in window coordinates.
+    fn reorderable_zones(
+        self: &Rc<Self>,
+        handle: &impl IsA<gtk::Widget>,
+        item: &impl IsA<gtk::Widget>,
+        zones: impl Fn(&gtk::graphene::Point) -> Vec<DropZone> + 'static,
+        on_drop: impl Fn(gtk::Widget, bool) + 'static,
+    ) {
+        const MARKS: [&str; 4] = ["wisp-drop-before", "wisp-drop-after", "wisp-drop-above", "wisp-drop-below"];
+        let clear = |w: &gtk::Widget| MARKS.iter().for_each(|m| w.remove_css_class(m));
+        let (handle, item) = (handle.clone().upcast::<gtk::Widget>(), item.clone().upcast::<gtk::Widget>());
         // (moving, current target and side)
         let state: Rc<RefCell<(bool, Option<(gtk::Widget, bool)>)>> = Rc::new(RefCell::new((false, None)));
         let gesture = gtk::GestureDrag::builder().button(1).build();
 
-        let (st, me, it, h, c) = (state.clone(), Rc::downgrade(self), item.clone(), handle.clone(), container.clone());
+        let (st, me, it, h) = (state.clone(), Rc::downgrade(self), item.clone(), handle.clone());
         gesture.connect_drag_update(move |g, dx, dy| {
             let mut s = st.borrow_mut();
             if !s.0 {
@@ -210,29 +224,46 @@ impl Shared {
                 it.add_css_class("wisp-dragging");
             }
             let Some((sx, sy)) = g.start_point() else { return };
-            let Some(p) = h.compute_point(&c, &gtk::graphene::Point::new((sx + dx) as f32, (sy + dy) as f32)) else { return };
-            let pos = if vertical { p.y() } else { p.x() };
+            let Some(p) = to_window(&h, &gtk::graphene::Point::new((sx + dx) as f32, (sy + dy) as f32)) else { return };
             let mut found = None;
-            let mut child = c.first_child();
-            while let Some(ch) = child {
-                if ch != it && ch.is_visible() {
-                    if let Some(b) = ch.compute_bounds(&c) {
-                        let (start, len) = if vertical { (b.y(), b.height()) } else { (b.x(), b.width()) };
-                        if pos >= start && pos < start + len {
-                            found = Some((ch.clone(), pos > start + len / 2.0));
-                        }
+            for zone in zones(&p) {
+                let c = &zone.container;
+                if !c.is_mapped() {
+                    continue;
+                }
+                if let Some(area) = &zone.area {
+                    match from_window(area, &p) {
+                        Some(q) if area.contains(q.x() as f64, q.y() as f64) => {}
+                        _ => continue,
                     }
                 }
-                child = ch.next_sibling();
+                let Some(q) = from_window(c, &p) else { continue };
+                let pos = if zone.vertical { q.y() } else { q.x() };
+                let mut child = c.first_child();
+                while let Some(ch) = child {
+                    // The dragged item, or its twin on the bar or in the menu.
+                    if ch != it && ch.widget_name() != it.widget_name() && ch.is_visible() {
+                        if let Some(b) = ch.compute_bounds(c) {
+                            let (start, len) = if zone.vertical { (b.y(), b.height()) } else { (b.x(), b.width()) };
+                            if pos >= start && pos < start + len {
+                                let after = pos > start + len / 2.0;
+                                found = Some((ch.clone(), after, MARKS[zone.vertical as usize * 2 + after as usize]));
+                            }
+                        }
+                    }
+                    child = ch.next_sibling();
+                }
+                if found.is_some() {
+                    break;
+                }
             }
             if let Some((old, _)) = s.1.take() {
-                old.remove_css_class(marks[0]);
-                old.remove_css_class(marks[1]);
+                clear(&old);
             }
-            if let Some((t, after)) = &found {
-                t.add_css_class(marks[*after as usize]);
+            if let Some((t, after, mark)) = found {
+                t.add_css_class(mark);
+                s.1 = Some((t, after));
             }
-            s.1 = found;
         });
 
         let on_drop = Rc::new(on_drop);
@@ -248,8 +279,7 @@ impl Shared {
             };
             it.remove_css_class("wisp-dragging");
             if let Some((t, _)) = &target {
-                t.remove_css_class(marks[0]);
-                t.remove_css_class(marks[1]);
+                clear(t);
             }
             let (Some(me), on_drop) = (me.upgrade(), on_drop.clone()) else { return };
             // After the gesture has fully finished.
@@ -296,6 +326,25 @@ impl Shared {
         let mut list = self.plugins.plugins.clone();
         list.sort_by_key(|p| order.iter().position(|id| *id == p.manifest.id).unwrap_or(usize::MAX));
         list
+    }
+
+    fn in_toolbar(&self, p: &plugins::Plugin) -> bool {
+        let cfg = self.config.borrow();
+        let id = &p.manifest.id;
+        if p.manifest.toolbar { !cfg.toolbar_hidden.contains(id) } else { cfg.toolbar_shown.contains(id) }
+    }
+
+    fn set_in_toolbar(&self, p: &plugins::Plugin, show: bool) {
+        let mut cfg = self.config.borrow_mut();
+        let id = &p.manifest.id;
+        cfg.toolbar_hidden.retain(|x| x != id);
+        cfg.toolbar_shown.retain(|x| x != id);
+        if show && !p.manifest.toolbar {
+            cfg.toolbar_shown.push(id.clone());
+        } else if !show && p.manifest.toolbar {
+            cfg.toolbar_hidden.push(id.clone());
+        }
+        cfg.save();
     }
 
     fn rebuild_plugin_bars(&self) {
@@ -1022,8 +1071,7 @@ impl BrowserWindow {
         while let Some(child) = self.plugin_bar.first_child() {
             self.plugin_bar.remove(&child);
         }
-        let hidden = self.shared.config.borrow().toolbar_hidden.clone();
-        for p in self.shared.ordered_plugins().iter().filter(|p| p.enabled.get() && !hidden.contains(&p.manifest.id)) {
+        for p in self.shared.ordered_plugins().iter().filter(|p| p.enabled.get() && self.shared.in_toolbar(p)) {
             for a in &p.manifest.actions {
                 let tooltip = match &a.shortcut {
                     Some(s) => format!("{} ({})", a.label, shortcut_label(s)),
@@ -1314,7 +1362,6 @@ impl BrowserWindow {
         if plugins.is_empty() {
             list.append(&gtk::Label::new(Some("No plugins installed")));
         }
-        let hidden = self.shared.config.borrow().toolbar_hidden.clone();
         for p in plugins {
             let id = p.manifest.id.clone();
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -1325,7 +1372,7 @@ impl BrowserWindow {
             let name = gtk::Label::builder().label(text.trim()).xalign(0.0).hexpand(true).tooltip_text(p.manifest.description.as_str()).build();
             row.append(&name);
             if !p.manifest.actions.is_empty() {
-                let in_toolbar = !hidden.contains(&id);
+                let in_toolbar = self.shared.in_toolbar(&p);
                 if !in_toolbar && p.enabled.get() {
                     // Kept out of the toolbar: its buttons live here.
                     for a in &p.manifest.actions {
@@ -1335,17 +1382,10 @@ impl BrowserWindow {
                     }
                 }
                 let toolbar = gtk::CheckButton::builder().label("Toolbar").active(in_toolbar).tooltip_text("Show this plugin's buttons in the toolbar").build();
-                let (w, l, pid) = (Rc::downgrade(self), list.clone(), id.clone());
+                let (w, l, plugin) = (Rc::downgrade(self), list.clone(), p.clone());
                 toolbar.connect_toggled(move |c| {
                     let Some(win) = w.upgrade() else { return };
-                    {
-                        let mut cfg = win.shared.config.borrow_mut();
-                        cfg.toolbar_hidden.retain(|x| *x != pid);
-                        if !c.is_active() {
-                            cfg.toolbar_hidden.push(pid.clone());
-                        }
-                        cfg.save();
-                    }
+                    win.shared.set_in_toolbar(&plugin, c.is_active());
                     win.shared.rebuild_plugin_bars();
                     let (win, l) = (win.clone(), l.clone());
                     glib::idle_add_local_once(move || win.fill_plugin_list(&l));
@@ -1991,7 +2031,7 @@ impl BrowserWindow {
             let name = b["name"].as_str().filter(|n| !n.trim().is_empty()).unwrap_or(&url).trim().to_string();
             let item = self.bookmark_widget(id, &name, &url, false, None);
             self.bookmarks_bar.append(&item);
-            self.bookmark_reorderable(&item, id, &self.bookmarks_bar, false);
+            self.bookmark_reorderable(&item, id);
             self.bookmark_items.borrow_mut().push((item.upcast(), id, name, url));
         }
     }
@@ -2049,9 +2089,41 @@ impl BrowserWindow {
         item
     }
 
-    fn bookmark_reorderable(self: &Rc<Self>, item: &gtk::Box, id: i64, container: &gtk::Box, vertical: bool) {
+    /// Bookmarks can be dragged along the bar, within the » menu and between
+    /// the two; holding one over » opens the menu.
+    fn bookmark_reorderable(self: &Rc<Self>, item: &gtk::Box, id: i64) {
         let w = Rc::downgrade(self);
-        self.shared.reorderable(item, item, container, vertical, move |target, after| {
+        let zones = move |p: &gtk::graphene::Point| {
+            let Some(win) = w.upgrade() else { return Vec::new() };
+            let mut zones = vec![DropZone {
+                container: win.bookmarks_bar.clone().upcast(),
+                vertical: false,
+                area: Some(win.bookmarks_scroll.clone().upcast()),
+            }];
+            let overflow = &win.bookmarks_overflow;
+            let Some(popover) = overflow.popover() else { return zones };
+            let over_button = overflow.can_target()
+                && from_window(overflow.upcast_ref(), p).is_some_and(|q| overflow.contains(q.x() as f64, q.y() as f64));
+            if over_button && !popover.is_visible() {
+                // Opened without autohide: that would grab the pointer
+                // away from the drag.
+                popover.set_autohide(false);
+                popover.popup();
+                let p = popover.clone();
+                win.shared.after_drag(move || {
+                    p.popdown();
+                    p.set_autohide(true);
+                });
+            }
+            let list = popover.child().and_downcast::<gtk::ScrolledWindow>();
+            let inner = list.as_ref().and_then(|l| l.child()).and_downcast::<gtk::Viewport>().and_then(|v| v.child());
+            if let (Some(list), Some(inner)) = (list, inner) {
+                zones.push(DropZone { container: inner, vertical: true, area: Some(list.upcast()) });
+            }
+            zones
+        };
+        let w = Rc::downgrade(self);
+        self.shared.reorderable_zones(item, item, zones, move |target, after| {
             let target = target.widget_name().strip_prefix("bookmark:").and_then(|t| t.parse::<i64>().ok());
             if let (Some(win), Some(target)) = (w.upgrade(), target) {
                 win.move_bookmark(id, target, after);
@@ -2140,7 +2212,7 @@ impl BrowserWindow {
             }
             let item = self.bookmark_widget(id, &name, &url, true, Some(popover));
             list.append(&item);
-            self.bookmark_reorderable(&item, id, &list, true);
+            self.bookmark_reorderable(&item, id);
         }
         gtk::ScrolledWindow::builder()
             .child(&list)
@@ -2376,6 +2448,51 @@ impl BrowserWindow {
         let progress = view.as_ref().map_or(0.0, |v| v.estimated_load_progress());
         self.entry.set_progress_fraction(if progress >= 1.0 { 0.0 } else { progress });
     }
+}
+
+/// A container whose children a drag can be dropped among. With `area`,
+/// only while the pointer is over it (the visible part of a scrolled list).
+#[derive(Clone)]
+struct DropZone {
+    container: gtk::Widget,
+    vertical: bool,
+    area: Option<gtk::Widget>,
+}
+
+/// Where a popover's own origin is, in the coordinates of the widget that
+/// owns the surface it pops up from. Popovers are separate surfaces, which
+/// `compute_point` doesn't see the offset of.
+fn popover_offset(popover: &gtk::Popover) -> Option<(f32, f32)> {
+    if !popover.is_mapped() {
+        return None;
+    }
+    let popup = popover.surface()?.downcast::<gdk::Popup>().ok()?;
+    let (tx, ty) = popover.surface_transform();
+    let (px, py) = popover.parent()?.native()?.surface_transform();
+    Some(((tx + popup.position_x() as f64 - px) as f32, (ty + popup.position_y() as f64 - py) as f32))
+}
+
+/// `p`, in `w`'s coordinates, in the coordinates of its window.
+fn to_window(w: &gtk::Widget, p: &gtk::graphene::Point) -> Option<gtk::graphene::Point> {
+    let native: gtk::Widget = w.native()?.upcast();
+    let p = w.compute_point(&native, p)?;
+    let Some(popover) = native.downcast_ref::<gtk::Popover>() else { return Some(p) };
+    let (ox, oy) = popover_offset(popover)?;
+    to_window(&popover.parent()?.native()?.upcast(), &gtk::graphene::Point::new(p.x() + ox, p.y() + oy))
+}
+
+/// The reverse of `to_window`.
+fn from_window(w: &gtk::Widget, p: &gtk::graphene::Point) -> Option<gtk::graphene::Point> {
+    let native: gtk::Widget = w.native()?.upcast();
+    let p = match native.downcast_ref::<gtk::Popover>() {
+        Some(popover) => {
+            let (ox, oy) = popover_offset(popover)?;
+            let q = from_window(&popover.parent()?.native()?.upcast(), p)?;
+            gtk::graphene::Point::new(q.x() - ox, q.y() - oy)
+        }
+        None => *p,
+    };
+    native.compute_point(w, &p)
 }
 
 fn install_css() {

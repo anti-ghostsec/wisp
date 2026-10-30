@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Blocked elements</title>
+<style>
+  :root { color-scheme: light dark; --muted: #8889; }
+  body { font: 14px system-ui, sans-serif; max-width: 52em; margin: 2em auto; padding: 0 1em; }
+  header { display: flex; gap: 1em; align-items: center; }
+  h1 { font-weight: 400; margin: 0; flex: 1; }
+  input { font: inherit; padding: .5em .8em; border-radius: 6px; border: 1px solid var(--muted); }
+  #q { width: 18em; }
+  h2 { font-size: 1em; font-weight: 600; margin: 1.6em 0 .3em; display: flex; align-items: center; gap: .6em; }
+  h2 span { flex: 1; }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li { display: flex; align-items: center; gap: .6em; padding: .35em .4em; border-bottom: 1px solid #8883; }
+  li input { flex: 1; font: 12.5px ui-monospace, monospace; padding: .35em .6em; border-color: transparent; background: none; }
+  li input:hover, li input:focus { border-color: var(--muted); }
+  li input.bad { border-color: #d33; }
+  li small { color: GrayText; white-space: nowrap; }
+  button { font: inherit; border: 0; background: none; color: GrayText; cursor: pointer; padding: .2em .5em; border-radius: 4px; }
+  button:hover { background: #8883; color: inherit; }
+  #status { color: GrayText; font-size: .9em; }
+</style>
+<header><h1>Blocked elements</h1><input id="q" placeholder="Search sites" autofocus></header>
+<p id="status">Loading…</p>
+<div id="sites"></div>

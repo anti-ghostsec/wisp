@@ -64,6 +64,8 @@ pub struct Config {
     pub plugin_order: Vec<String>,
     /// Plugins whose buttons are kept out of the toolbar (still in the ☰ menu).
     pub toolbar_hidden: Vec<String>,
+    /// Plugins that start out of the toolbar but were put in it.
+    pub toolbar_shown: Vec<String>,
 }
 
 impl Default for Config {
@@ -94,6 +96,7 @@ impl Default for Config {
             plugins: BTreeMap::new(),
             plugin_order: Vec::new(),
             toolbar_hidden: Vec::new(),
+            toolbar_shown: Vec::new(),
         }
     }
 }

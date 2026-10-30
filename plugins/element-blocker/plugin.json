@@ -1,0 +1,19 @@
+{
+  "id": "element-blocker",
+  "name": "Element Blocker",
+  "version": "1.0",
+  "description": "Hide things on a page for good: right-click → Block element…, point at it, click. Nothing is blocked until you pick it. Rules are kept per site and can be removed under Blocked elements.",
+  "permissions": ["storage"],
+  "toolbar": false,
+  "actions": [
+    { "id": "pick", "label": "Block an element", "icon": "icons/block-symbolic.svg", "shortcut": "<Ctrl><Shift>e" },
+    { "id": "list", "label": "Blocked elements", "icon": "icons/list-symbolic.svg", "page": "list.html" }
+  ],
+  "context_menu": [
+    { "id": "block", "label": "Block element…", "contexts": ["page"] }
+  ],
+  "content_scripts": [
+    { "matches": ["*://*/*"], "js": ["block.js"], "run_at": "document_start" },
+    { "matches": ["wisp-plugin://element-blocker/*"], "js": ["list.js"], "run_at": "document_end" }
+  ]
+}
