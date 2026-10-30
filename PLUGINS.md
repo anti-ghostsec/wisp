@@ -89,7 +89,8 @@ await wisp.storage.get(key)      // "storage": JSON value or null
 await wisp.storage.set(key, val) // persisted to ~/.local/share/wisp/plugin-data/, 1 MB quota
 await wisp.storage.remove(key)
 await wisp.storage.keys()
-await wisp.tabs.open(url)        // "tabs": open an http(s) URL in a background tab
+await wisp.tabs.open(url)        // "tabs": open an http(s) URL in a background tab, or one of
+                                 // the plugin's own pages in front
 await wisp.tabs.current()        // "tabs": { id, url, title } of the current tab
 await wisp.runtime.sendMessage(msg)  // to the background script; resolves to its handler's answer
 wisp.onMessage(async (msg) => answer) // background: answer messages (the first non-undefined answer wins)

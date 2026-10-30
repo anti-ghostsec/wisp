@@ -40,6 +40,10 @@ pub struct Shared {
     /// Optional history and saved tabs.
     pub state: Rc<Store>,
     session_save_queued: Cell<bool>,
+    /// A drag is in progress somewhere in Wisp.
+    drag_active: Cell<bool>,
+    /// What a drop decided, run once the drag has fully ended (see `after_drag`).
+    after_drag: RefCell<Vec<Box<dyn FnOnce()>>>,
     /// Owns every open window; widget callbacks only hold weak references.
     windows: RefCell<Vec<Rc<BrowserWindow>>>,
 }
@@ -47,9 +51,9 @@ pub struct Shared {
 struct UiBridge(Weak<Shared>);
 
 impl PluginUi for UiBridge {
-    fn open_tab(&self, url: &str) {
+    fn open_tab(&self, url: &str, focus: bool) {
         if let Some(win) = self.0.upgrade().and_then(|s| s.last_window()) {
-            win.new_tab(Some(url), None, false);
+            win.new_tab(Some(url), None, focus);
         }
     }
 
@@ -131,16 +135,22 @@ impl Shared {
             downloads: Downloads::new(),
             state: Store::new(),
             session_save_queued: Cell::new(false),
+            drag_active: Cell::new(false),
+            after_drag: RefCell::new(Vec::new()),
             windows: RefCell::new(Vec::new()),
         });
         shared.watch_downloads();
         let weak = Rc::downgrade(&shared);
         shared.sync.connect_changed(move || {
-            if let Some(shared) = weak.upgrade() {
-                for win in shared.windows.borrow().iter() {
-                    win.rebuild_bookmarks_bar();
+            let Some(shared) = weak.upgrade() else { return };
+            let again = Rc::downgrade(&shared);
+            shared.after_drag(move || {
+                if let Some(shared) = again.upgrade() {
+                    for win in shared.windows.borrow().iter() {
+                        win.rebuild_bookmarks_bar();
+                    }
                 }
-            }
+            });
         });
         shared.plugins.set_ui(Rc::new(UiBridge(Rc::downgrade(&shared))));
         shared.plugins.sync_backgrounds();
@@ -150,6 +160,49 @@ impl Shared {
         shared.install_plugin_accels();
         shared.apply_color_scheme();
         shared
+    }
+
+    /// Run `f` once no drag is in progress (soon, if none is). Changing or
+    /// destroying widgets while GTK is still finishing a drag, the dragged
+    /// one above all, leaves its pointer grab stuck: clicks stop working
+    /// and the next drag crashes. So drops only decide, and this applies.
+    fn after_drag(&self, f: impl FnOnce() + 'static) {
+        if self.drag_active.get() {
+            self.after_drag.borrow_mut().push(Box::new(f));
+        } else {
+            glib::idle_add_local_once(f);
+        }
+    }
+
+    /// A drag source carrying `value`, shown as a still picture of `widget`.
+    fn drag_source(self: &Rc<Self>, widget: &impl IsA<gtk::Widget>, value: String, on_prepare: impl Fn() + 'static) -> gtk::DragSource {
+        let source = gtk::DragSource::builder().actions(gdk::DragAction::MOVE).build();
+        let w = widget.clone().upcast::<gtk::Widget>();
+        source.connect_prepare(move |source, _, _| {
+            on_prepare();
+            // A snapshot, not a live view of a widget that may be rebuilt.
+            source.set_icon(Some(&gtk::WidgetPaintable::new(Some(&w)).current_image()), 0, 0);
+            Some(gdk::ContentProvider::for_value(&value.to_value()))
+        });
+        let me = Rc::downgrade(self);
+        source.connect_drag_begin(move |_, _| {
+            if let Some(me) = me.upgrade() {
+                me.drag_active.set(true);
+            }
+        });
+        let me = Rc::downgrade(self);
+        source.connect_drag_end(move |_, _, _| {
+            let Some(me) = me.upgrade() else { return };
+            // GTK finishes the drag after this signal; apply changes after that.
+            glib::idle_add_local_once(move || {
+                me.drag_active.set(false);
+                let jobs: Vec<_> = me.after_drag.borrow_mut().drain(..).collect();
+                for job in jobs {
+                    job();
+                }
+            });
+        });
+        source
     }
 
     /// A web view with Wisp's session, settings and plugins, sharing the web
@@ -671,14 +724,9 @@ impl BrowserWindow {
                 p.set_child(Some(&win.hidden_bookmarks_list(p)));
             }
         });
-        // Dragging a bookmark over » opens it, to drop inside; dropping on »
-        // itself moves the bookmark to the end.
+        // Dropping a bookmark on » moves it to the end. (It doesn't open
+        // mid-drag: a popup taking the pointer during a drag breaks the drag.)
         let target = gtk::DropTarget::new(glib::Type::STRING, gdk::DragAction::MOVE);
-        let o = overflow.clone();
-        target.connect_enter(move |_, _, _| {
-            o.popup();
-            gdk::DragAction::MOVE
-        });
         let w = Rc::downgrade(&win);
         target.connect_drop(move |_, value, _, _| {
             let (Some(win), Some(moved)) = (w.upgrade(), dragged_bookmark(value)) else { return false };
@@ -1273,13 +1321,7 @@ impl BrowserWindow {
             });
             row.append(&switch);
 
-            let source = gtk::DragSource::builder().actions(gdk::DragAction::MOVE).build();
-            let (r, drag_id) = (row.clone(), id.clone());
-            source.connect_prepare(move |source, _, _| {
-                source.set_icon(Some(&gtk::WidgetPaintable::new(Some(&r))), 0, 0);
-                Some(gdk::ContentProvider::for_value(&format!("wisp-plugin:{drag_id}").to_value()))
-            });
-            handle.add_controller(source);
+            handle.add_controller(self.shared.drag_source(&row, format!("wisp-plugin:{id}"), || {}));
             let target = gtk::DropTarget::new(glib::Type::STRING, gdk::DragAction::MOVE);
             let (w, l, r, target_id) = (Rc::downgrade(self), list.clone(), row.clone(), id.clone());
             target.connect_drop(move |_, value, _, y| {
@@ -1292,14 +1334,18 @@ impl BrowserWindow {
                 let at = order.iter().position(|x| *x == target_id).unwrap_or(order.len());
                 let at = if y > r.height() as f64 / 2.0 { at + 1 } else { at };
                 order.insert(at.min(order.len()), moved);
-                {
-                    let mut cfg = win.shared.config.borrow_mut();
-                    cfg.plugin_order = order;
-                    cfg.save();
-                }
-                win.shared.rebuild_plugin_bars();
                 let l = l.clone();
-                glib::idle_add_local_once(move || win.fill_plugin_list(&l));
+                let w = Rc::downgrade(&win);
+                win.shared.after_drag(move || {
+                    let Some(win) = w.upgrade() else { return };
+                    {
+                        let mut cfg = win.shared.config.borrow_mut();
+                        cfg.plugin_order = order;
+                        cfg.save();
+                    }
+                    win.shared.rebuild_plugin_bars();
+                    win.fill_plugin_list(&l);
+                });
                 true
             });
             row.add_controller(target);
@@ -1821,14 +1867,12 @@ impl BrowserWindow {
 
     /// Tabs can be dragged to a new position in the strip.
     fn make_draggable(self: &Rc<Self>, tab: &Rc<Tab>) {
-        let source = gtk::DragSource::builder().actions(gdk::DragAction::MOVE).build();
         let w = Rc::downgrade(self);
         let t = Rc::downgrade(tab);
-        source.connect_prepare(move |source, _, _| {
-            let (win, tab) = (w.upgrade()?, t.upgrade()?);
-            source.set_icon(Some(&gtk::WidgetPaintable::new(Some(&tab.header))), 0, 0);
-            *win.dragging.borrow_mut() = Some(Rc::downgrade(&tab));
-            Some(gdk::ContentProvider::for_value(&"wisp-tab".to_value()))
+        let source = self.shared.drag_source(&tab.header, "wisp-tab".into(), move || {
+            if let (Some(win), Some(tab)) = (w.upgrade(), t.upgrade()) {
+                *win.dragging.borrow_mut() = Some(Rc::downgrade(&tab));
+            }
         });
         tab.header.add_controller(source);
 
@@ -1847,9 +1891,13 @@ impl BrowserWindow {
             if from < to {
                 to -= 1;
             }
-            win.notebook.reorder_child(&moved.page, Some(to));
-            win.order_strip();
-            win.shared.save_session_soon();
+            let w = Rc::downgrade(&win);
+            win.shared.after_drag(move || {
+                let Some(win) = w.upgrade() else { return };
+                win.notebook.reorder_child(&moved.page, Some(to));
+                win.order_strip();
+                win.shared.save_session_soon();
+            });
             true
         });
         tab.header.add_controller(target);
@@ -1967,13 +2015,7 @@ impl BrowserWindow {
         });
         item.add_controller(click);
 
-        let source = gtk::DragSource::builder().actions(gdk::DragAction::MOVE).build();
-        let it = item.clone();
-        source.connect_prepare(move |source, _, _| {
-            source.set_icon(Some(&gtk::WidgetPaintable::new(Some(&it))), 0, 0);
-            Some(gdk::ContentProvider::for_value(&format!("wisp-bookmark:{id}").to_value()))
-        });
-        item.add_controller(source);
+        item.add_controller(self.shared.drag_source(&item, format!("wisp-bookmark:{id}"), || {}));
 
         let target = gtk::DropTarget::new(glib::Type::STRING, gdk::DragAction::MOVE);
         let (w, it) = (Rc::downgrade(self), item.clone());
@@ -1998,14 +2040,16 @@ impl BrowserWindow {
     }
 
     fn move_bookmark(self: &Rc<Self>, id: i64, target: i64, after: bool) {
-        if let Some(p) = self.bookmarks_overflow.popover() {
-            p.popdown();
-        }
-        let sync = self.shared.sync.clone();
-        glib::spawn_future_local(async move {
-            if let Err(e) = sync.move_entry(id, target, after, &["b_".to_string()]).await {
-                eprintln!("wisp: moving bookmark: {e}");
+        let (sync, w) = (self.shared.sync.clone(), Rc::downgrade(self));
+        self.shared.after_drag(move || {
+            if let Some(p) = w.upgrade().and_then(|win| win.bookmarks_overflow.popover()) {
+                p.popdown();
             }
+            glib::spawn_future_local(async move {
+                if let Err(e) = sync.move_entry(id, target, after, &["b_".to_string()]).await {
+                    eprintln!("wisp: moving bookmark: {e}");
+                }
+            });
         });
     }
 

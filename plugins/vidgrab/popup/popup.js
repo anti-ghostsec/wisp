@@ -141,7 +141,8 @@ async function init() {
   $("download").addEventListener("click", () => {
     send({ type: "download", url: tab.url, title: tab.title, preset: $("preset").value });
   });
-  $("settings").addEventListener("click", () => { wisp.tabs.open("wisp-plugin://vidgrab/options/options.html"); window.close(); });
+  // Wait for the tab to open: closing the popup first would cancel the request.
+  $("settings").addEventListener("click", async () => { await wisp.tabs.open("wisp-plugin://vidgrab/options/options.html"); window.close(); });
   $("install").addEventListener("click", () => send({ type: "install-ytdlp" }));
   $("retry").addEventListener("click", async () => { await send({ type: "refresh-status" }); setTimeout(refresh, 800); });
   $("clear").addEventListener("click", () => send({ type: "clear-finished" }));

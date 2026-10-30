@@ -223,7 +223,8 @@ impl Plugin {
 
 /// Things the plugin API needs from the browser UI.
 pub trait PluginUi {
-    fn open_tab(&self, url: &str);
+    /// Open a tab; `focus` switches to it.
+    fn open_tab(&self, url: &str, focus: bool);
     fn notify(&self, title: &str, body: &str);
     /// Plugins were enabled/disabled (or a badge changed): refresh toolbars.
     fn plugins_changed(&self);
@@ -825,8 +826,9 @@ impl PluginHost {
                 if !(url.starts_with("https://") || url.starts_with("http://") || own_page) {
                     return Err("tabs.open only accepts http(s) URLs and the plugin's own pages".into());
                 }
+                // The plugin's own pages (settings, lists) are shown right away.
                 if let Some(ui) = self.ui.borrow().clone() {
-                    ui.open_tab(url);
+                    ui.open_tab(url, own_page);
                 }
                 Ok(Json::Null)
             }
