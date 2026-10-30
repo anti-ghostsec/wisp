@@ -372,7 +372,11 @@ pub struct BrowserWindow {
     /// Toolbar and tab strip, hidden in fullscreen.
     chrome: Vec<gtk::Widget>,
     bookmarks_bar: gtk::Box,
+    /// The bar plus its » menu; what gets shown and hidden.
+    bookmarks_row: gtk::Box,
     bookmarks_scroll: gtk::ScrolledWindow,
+    /// (button, name, url) of each bookmark on the bar, for the » menu.
+    bookmark_items: RefCell<Vec<(gtk::Button, String, String)>>,
     popup_bar: gtk::Revealer,
     popup_label: gtk::Label,
     /// (url, opener site) of the last blocked pop-up.
@@ -498,14 +502,43 @@ impl BrowserWindow {
             .child(&bookmarks_bar)
             .hscrollbar_policy(gtk::PolicyType::External)
             .vscrollbar_policy(gtk::PolicyType::Never)
+            .hexpand(true)
+            .build();
+        // Bookmarks keep their natural width; what doesn't fit scrolls (mouse
+        // wheel) and is listed under », as in Firefox.
+        if let Some(viewport) = bookmarks_scroll.child().and_downcast::<gtk::Viewport>() {
+            viewport.set_hscroll_policy(gtk::ScrollablePolicy::Natural);
+        }
+        let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
+        let adj = bookmarks_scroll.hadjustment();
+        wheel.connect_scroll(move |_, dx, dy| {
+            adj.set_value(adj.value() + (dx + dy) * 40.0);
+            glib::Propagation::Stop
+        });
+        bookmarks_scroll.add_controller(wheel);
+        let overflow_popover = gtk::Popover::new();
+        let overflow = gtk::MenuButton::builder()
+            .child(&gtk::Label::new(Some("»")))
+            .tooltip_text("More bookmarks")
+            .has_frame(false)
+            .popover(&overflow_popover)
+            .visible(false)
+            .build();
+        let adj = bookmarks_scroll.hadjustment();
+        let o = overflow.clone();
+        adj.connect_changed(move |a| o.set_visible(a.upper() > a.page_size() + 1.0));
+        let bookmarks_row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
             .visible(shared.config.borrow().show_bookmarks_bar)
             .build();
+        bookmarks_row.append(&bookmarks_scroll);
+        bookmarks_row.append(&overflow);
 
         let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
         let chrome = vec![toolbar.clone().upcast(), separator.clone().upcast(), tab_bar.clone().upcast()];
         vbox.append(&toolbar);
-        vbox.append(&bookmarks_scroll);
+        vbox.append(&bookmarks_row);
         vbox.append(&separator);
         vbox.append(&popup_bar);
         vbox.append(&find_bar);
@@ -531,7 +564,9 @@ impl BrowserWindow {
             downloads_popover,
             chrome,
             bookmarks_bar,
+            bookmarks_row,
             bookmarks_scroll,
+            bookmark_items: RefCell::new(Vec::new()),
             popup_bar,
             popup_label,
             blocked_popup: RefCell::new(None),
@@ -540,6 +575,12 @@ impl BrowserWindow {
         win.rebuild_plugin_bar();
         win.refresh_downloads();
         win.rebuild_bookmarks_bar();
+        let w = Rc::downgrade(&win);
+        overflow_popover.connect_show(move |p| {
+            if let Some(win) = w.upgrade() {
+                p.set_child(Some(&win.hidden_bookmarks_list(p)));
+            }
+        });
         shared.windows.borrow_mut().push(win.clone());
         let w = Rc::downgrade(&win);
         win.window.connect_close_request(move |_| {
@@ -575,7 +616,7 @@ impl BrowserWindow {
                     widget.set_visible(!window.is_fullscreen());
                 }
                 let bar = win.shared.config.borrow().show_bookmarks_bar;
-                win.bookmarks_scroll.set_visible(bar && !window.is_fullscreen());
+                win.bookmarks_row.set_visible(bar && !window.is_fullscreen());
             }
         });
         let w = Rc::downgrade(self);
@@ -702,7 +743,7 @@ impl BrowserWindow {
                 cfg.show_bookmarks_bar
             };
             for win in w.shared.windows.borrow().iter() {
-                win.bookmarks_scroll.set_visible(show && !win.window.is_fullscreen());
+                win.bookmarks_row.set_visible(show && !win.window.is_fullscreen());
             }
         }));
         add("history", Box::new(|w| {
@@ -973,7 +1014,7 @@ impl BrowserWindow {
         vbox.append(&toggle("Show bookmarks bar", cfg.show_bookmarks_bar, |shared, on| {
             shared.config.borrow_mut().show_bookmarks_bar = on;
             for win in shared.windows.borrow().iter() {
-                win.bookmarks_scroll.set_visible(on && !win.window.is_fullscreen());
+                win.bookmarks_row.set_visible(on && !win.window.is_fullscreen());
             }
         }));
         vbox.append(&toggle("Remember history", cfg.save_history, |shared, on| {
@@ -1600,6 +1641,7 @@ impl BrowserWindow {
         while let Some(child) = self.bookmarks_bar.first_child() {
             self.bookmarks_bar.remove(&child);
         }
+        self.bookmark_items.borrow_mut().clear();
         let marks = self.shared.sync.cached("b_");
         if marks.is_empty() {
             let hint = gtk::Label::builder().label("Bookmarks you add (Ctrl+D) show up here").css_classes(["dim-label"]).margin_start(8).build();
@@ -1608,7 +1650,14 @@ impl BrowserWindow {
         for b in marks {
             let url = b["url"].as_str().unwrap_or("").to_string();
             let name = b["name"].as_str().filter(|n| !n.trim().is_empty()).unwrap_or(&url).trim().to_string();
-            let label = gtk::Label::builder().label(name.as_str()).ellipsize(gtk::pango::EllipsizeMode::End).max_width_chars(22).build();
+            // Never narrower than the name (up to 22 characters), so names
+            // can't be squeezed down to "…".
+            let label = gtk::Label::builder()
+                .label(name.as_str())
+                .ellipsize(gtk::pango::EllipsizeMode::End)
+                .width_chars(name.chars().count().min(22) as i32)
+                .max_width_chars(22)
+                .build();
             let button = gtk::Button::builder().child(&label).tooltip_text(format!("{name}\n{url}")).css_classes(["flat"]).build();
             let (w, u) = (Rc::downgrade(self), url.clone());
             button.connect_clicked(move |_| {
@@ -1629,7 +1678,41 @@ impl BrowserWindow {
                 self.make_bookmark_movable(&button, id, &b["url"]);
             }
             self.bookmarks_bar.append(&button);
+            let url = b["url"].as_str().unwrap_or("").to_string();
+            self.bookmark_items.borrow_mut().push((button, name, url));
         }
+    }
+
+    /// The » menu: bookmarks that are scrolled out of view on the bar.
+    fn hidden_bookmarks_list(self: &Rc<Self>, popover: &gtk::Popover) -> gtk::Widget {
+        let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let adj = self.bookmarks_scroll.hadjustment();
+        let (left, right) = (adj.value(), adj.value() + adj.page_size());
+        for (button, name, url) in self.bookmark_items.borrow().iter() {
+            let Some(b) = button.compute_bounds(&self.bookmarks_bar) else { continue };
+            if (b.x() as f64) >= left - 1.0 && (b.x() + b.width()) as f64 <= right + 1.0 {
+                continue;
+            }
+            let label = gtk::Label::builder().label(name.as_str()).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).max_width_chars(40).build();
+            let item = gtk::Button::builder().child(&label).tooltip_text(url.as_str()).css_classes(["flat"]).build();
+            let (w, u, p) = (Rc::downgrade(self), url.clone(), popover.clone());
+            item.connect_clicked(move |_| {
+                p.popdown();
+                if let Some(win) = w.upgrade() {
+                    if let Some(tab) = win.current_tab() {
+                        win.navigate(&tab, &u);
+                    }
+                }
+            });
+            list.append(&item);
+        }
+        let scroll = gtk::ScrolledWindow::builder()
+            .child(&list)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_height(true)
+            .max_content_height(500)
+            .build();
+        scroll.upcast()
     }
 
     fn make_bookmark_movable(self: &Rc<Self>, button: &gtk::Button, id: i64, url: &serde_json::Value) {

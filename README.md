@@ -103,7 +103,8 @@ open in a Wisp tab, and anything else shows its path with **Copy path**.
 All optional, from the ☰ menu:
 
 - **Show bookmarks bar** (Ctrl+Shift+B): your bookmarks under the address
-  bar. Click to open, middle-click for a new tab, drag one onto another to
+  bar. Bookmarks that don't fit are under » at the end (or scroll the bar
+  with the mouse wheel). Click to open, middle-click for a new tab, drag one onto another to
   move it, right-click to open in a new tab or delete. The bookmarks page
   (Ctrl+Shift+O) lists them in the same order: drag the ⠿ handle to
   reorder, or edit names and addresses. The order syncs with the bookmarks.
