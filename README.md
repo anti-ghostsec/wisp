@@ -89,6 +89,11 @@ Right-clicking a text field also offers **Fill saved login…** and **Generate
 strong password**. A lone password field while you're logged in (a "confirm
 your password" prompt) is never filled automatically or offered for saving.
 
+Local servers work too, over plain HTTP: `localhost`, `*.localhost`,
+`*.test` and IP addresses (a dev server, your router), each address and port
+with its own logins. Other plain-HTTP sites are left alone, since a password
+sent there isn't encrypted.
+
 **Importing**: the password manager imports CSV or JSON exports from Firefox,
 Chrome, Edge, Brave, Safari, Proton Pass, Bitwarden and KeePassXC (export
 them unencrypted). The bookmarks page imports the `bookmarks.html` file

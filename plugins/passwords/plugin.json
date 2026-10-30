@@ -13,7 +13,7 @@
     { "id": "generate", "label": "Generate strong password", "contexts": ["editable"] }
   ],
   "content_scripts": [
-    { "matches": ["https://*/*"], "js": ["fill.js"], "run_at": "document_end" },
+    { "matches": ["https://*/*", "http://*/*"], "js": ["fill.js"], "run_at": "document_end" },
     { "matches": ["wisp-plugin://passwords/*"], "js": ["import.js", "list.js"], "run_at": "document_end" }
   ]
 }

@@ -5,7 +5,8 @@
   let all = [];
   let editing = null;
 
-  const hostOf = (url) => { try { return new URL(url).hostname; } catch { return ""; } };
+  // With the port, which tells local servers apart (localhost:8450).
+  const hostOf = (url) => { try { return new URL(url).host; } catch { return ""; } };
   const toEntry = (e) => {
     let d = {};
     try { d = JSON.parse(e.description || "{}"); } catch {}
@@ -35,7 +36,9 @@
     status(all.length ? `${all.length} saved login${all.length === 1 ? "" : "s"}` : "No saved passwords yet. Log in to a site and choose Save when asked, or import them.");
 
   const save = async (entry, fields) => {
-    const url = /^https?:\/\//.test(fields.url) ? fields.url : "https://" + fields.url;
+    // Local servers usually speak plain HTTP.
+    const local = /^(localhost|[^/]*\.(localhost|test)|\d+\.\d+\.\d+\.\d+|\[)(?=[:/]|$)/.test(fields.url);
+    const url = /^https?:\/\//.test(fields.url) ? fields.url : (local ? "http://" : "https://") + fields.url;
     let origin;
     try { origin = new URL(url).origin; } catch { return status("That site address isn't valid."); }
     if (!fields.password) return status("The password can't be empty.");

@@ -1,10 +1,17 @@
 // Fills saved logins and offers to save new ones. Runs in the plugin's
 // isolated world: the page can't see this code, the credentials or `wisp`.
 (() => {
-  const host = location.hostname.replace(/^www\./, "");
+  // Local servers (development, routers, NAS boxes) count too, by address
+  // and port, since each port is usually a different app; other plain-HTTP
+  // sites don't, as a password typed there travels unencrypted.
+  const isLocal = (h) => h === "localhost" || /\.(localhost|test)$/.test(h) || /^\d+\.\d+\.\d+\.\d+$/.test(h) || h.startsWith("[");
+  if (location.protocol !== "https:" && !isLocal(location.hostname)) return;
+  const hostOf = (u) => (isLocal(u.hostname) ? u.host : u.hostname.replace(/^www\./, ""));
+  const host = hostOf(location);
   // Logins are shared across a site's subdomains (accounts.example.com and
   // example.com). A rough registrable domain is enough for that.
-  const siteOf = (h) => h.split(".").slice(/\.(co|com|org|net|gov|ac|edu|ne|or)\.[a-z]{2}$/.test(h) ? -3 : -2).join(".");
+  const siteOf = (h) =>
+    isLocal(h.replace(/:\d+$/, "")) ? h : h.split(".").slice(/\.(co|com|org|net|gov|ac|edu|ne|or)\.[a-z]{2}$/.test(h) ? -3 : -2).join(".");
   const site = siteOf(host);
 
   // ---- finding fields ----
@@ -77,7 +84,7 @@
       .map((e) => {
         try {
           const d = JSON.parse(e.description || "{}");
-          const h = new URL(e.url).hostname.replace(/^www\./, "");
+          const h = hostOf(new URL(e.url));
           return { id: e.id, host: h, username: d.username || "", password: d.password || "" };
         } catch {
           return null;
