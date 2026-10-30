@@ -103,7 +103,10 @@ open in a Wisp tab, and anything else shows its path with **Copy path**.
 All optional, from the ☰ menu:
 
 - **Show bookmarks bar** (Ctrl+Shift+B): your bookmarks under the address
-  bar. Click to open, middle-click for a new tab.
+  bar. Click to open, middle-click for a new tab, drag one onto another to
+  move it, right-click to open in a new tab or delete. The bookmarks page
+  (Ctrl+Shift+O) lists them in the same order: drag the ⠿ handle to
+  reorder, or edit names and addresses. The order syncs with the bookmarks.
 - **Remember history** (off by default): Ctrl+H shows it, grouped by day and
   searchable. Turning it off deletes it.
 - **Reopen tabs on start** (off by default): your windows and tabs come back

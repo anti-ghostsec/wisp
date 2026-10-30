@@ -99,6 +99,7 @@ await wisp.sync.list(prefix?)    // [{ id, title, name, url, description, tags }
 await wisp.sync.add({ title, url, description?, tags? })   // returns the new id
 await wisp.sync.update(id, { title?, url?, description?, tags? })
 await wisp.sync.remove(id)
+await wisp.sync.move(id, target, after = false)   // put entry `id` before (or after) entry `target`
 await wisp.sync.status()         // { configured, service?, id?, pending? }
 ```
 

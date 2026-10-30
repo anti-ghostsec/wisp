@@ -1593,14 +1593,14 @@ impl BrowserWindow {
     }
 
     /// For testing: save the window as a PNG after `delay`, then quit.
-    /// Bookmarks as buttons under the address bar: click opens in this tab,
-    /// middle-click in a new one.
+    /// Bookmarks as buttons under the address bar, in their saved order: click
+    /// opens in this tab, middle-click in a new one, drag to reorder,
+    /// right-click for more.
     fn rebuild_bookmarks_bar(self: &Rc<Self>) {
         while let Some(child) = self.bookmarks_bar.first_child() {
             self.bookmarks_bar.remove(&child);
         }
-        let mut marks = self.shared.sync.cached("b_");
-        marks.sort_by_key(|b| b["id"].as_i64().unwrap_or(0));
+        let marks = self.shared.sync.cached("b_");
         if marks.is_empty() {
             let hint = gtk::Label::builder().label("Bookmarks you add (Ctrl+D) show up here").css_classes(["dim-label"]).margin_start(8).build();
             self.bookmarks_bar.append(&hint);
@@ -1625,8 +1625,87 @@ impl BrowserWindow {
                 }
             });
             button.add_controller(middle);
+            if let Some(id) = b["id"].as_i64() {
+                self.make_bookmark_movable(&button, id, &b["url"]);
+            }
             self.bookmarks_bar.append(&button);
         }
+    }
+
+    fn make_bookmark_movable(self: &Rc<Self>, button: &gtk::Button, id: i64, url: &serde_json::Value) {
+        let source = gtk::DragSource::builder().actions(gdk::DragAction::MOVE).build();
+        let b = button.clone();
+        source.connect_prepare(move |source, _, _| {
+            source.set_icon(Some(&gtk::WidgetPaintable::new(Some(&b))), 0, 0);
+            Some(gdk::ContentProvider::for_value(&format!("wisp-bookmark:{id}").to_value()))
+        });
+        button.add_controller(source);
+
+        let target = gtk::DropTarget::new(glib::Type::STRING, gdk::DragAction::MOVE);
+        let (sync, b) = (self.shared.sync.clone(), button.clone());
+        target.connect_drop(move |_, value, x, _| {
+            let Some(moved) = value.get::<String>().ok().and_then(|v| v.strip_prefix("wisp-bookmark:")?.parse::<i64>().ok()) else {
+                return false;
+            };
+            // Dropped on the right half: place after this one.
+            let after = x > b.width() as f64 / 2.0;
+            let sync = sync.clone();
+            glib::spawn_future_local(async move {
+                if let Err(e) = sync.move_entry(moved, id, after, &["b_".to_string()]).await {
+                    eprintln!("wisp: moving bookmark: {e}");
+                }
+            });
+            true
+        });
+        button.add_controller(target);
+
+        let menu = gtk::GestureClick::builder().button(3).build();
+        let (w, b, url) = (Rc::downgrade(self), button.clone(), url.as_str().unwrap_or("").to_string());
+        menu.connect_pressed(move |_, _, _, _| {
+            let Some(win) = w.upgrade() else { return };
+            let popover = gtk::Popover::new();
+            popover.set_parent(&b);
+            let items = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            let open = gtk::Button::builder().label("Open in new tab").css_classes(["flat"]).build();
+            let manage = gtk::Button::builder().label("Manage bookmarks…").css_classes(["flat"]).build();
+            let delete = gtk::Button::builder().label("Delete").css_classes(["flat"]).build();
+            for item in [&open, &manage, &delete] {
+                item.child().and_then(|c| c.downcast::<gtk::Label>().ok()).inspect(|l| l.set_xalign(0.0));
+                items.append(item);
+            }
+            popover.set_child(Some(&items));
+            let (w2, u, p) = (Rc::downgrade(&win), url.clone(), popover.clone());
+            open.connect_clicked(move |_| {
+                p.popdown();
+                if let Some(win) = w2.upgrade() {
+                    win.new_tab(Some(&u), None, false);
+                }
+            });
+            let (w2, p) = (Rc::downgrade(&win), popover.clone());
+            manage.connect_clicked(move |_| {
+                p.popdown();
+                if let Some(win) = w2.upgrade() {
+                    win.run_plugin_action("bookmarks", "list");
+                }
+            });
+            let (sync, p) = (win.shared.sync.clone(), popover.clone());
+            delete.connect_clicked(move |_| {
+                p.popdown();
+                let sync = sync.clone();
+                glib::spawn_future_local(async move {
+                    if let Err(e) = sync.remove(id, &["b_".to_string()]).await {
+                        eprintln!("wisp: deleting bookmark: {e}");
+                    }
+                });
+            });
+            // Unparent once closed, so rebuilding the bar can't leak it.
+            popover.connect_closed(|p| {
+                let p = p.clone();
+                glib::idle_add_local_once(move || p.unparent());
+            });
+            popover.popup();
+        });
+        button.add_controller(menu);
     }
 
     fn refresh_downloads(self: &Rc<Self>) {

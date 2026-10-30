@@ -16,6 +16,12 @@
   button:hover { background: #8883; color: inherit; }
   header button { border: 1px solid #8886; color: inherit; }
   #status { color: GrayText; font-size: .9em; }
+  .handle { cursor: grab; color: GrayText; padding: 0 .2em; user-select: none; }
+  li.dragging { opacity: .4; }
+  li.over-top { box-shadow: inset 0 2px 0 #3a6ee8; }
+  li.over-bottom { box-shadow: inset 0 -2px 0 #3a6ee8; }
+  li.editing input { width: auto; flex: 1; }
+  button.main { background: #3a6ee8; color: #fff; }
 </style>
 <header><h1>Bookmarks</h1><input id="q" placeholder="Search bookmarks" autofocus><button id="import" title="Import an HTML bookmarks export from Firefox, Chrome, Edge, Brave or Safari">Import…</button><input id="file" type="file" accept=".html,.htm,.json" hidden></header>
 <p id="status">Loading…</p>

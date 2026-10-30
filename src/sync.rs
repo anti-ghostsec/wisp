@@ -239,6 +239,13 @@ impl Sync {
         self.write(json!({ "op": "update", "id": id, "fields": fields, "prefix": prefix }))
     }
 
+    /// Put entry `id` just before (or after) entry `target`. Order is the
+    /// tree's own, so it syncs and other xBrowserSync apps show it too.
+    pub async fn move_entry(self: &Rc<Self>, id: i64, target: i64, after: bool, prefix: &[String]) -> Result<(), String> {
+        self.prepare_write().await?;
+        self.write(json!({ "op": "move", "id": id, "target": target, "after": after, "prefix": prefix }))
+    }
+
     pub async fn remove(self: &Rc<Self>, id: i64, prefix: &[String]) -> Result<(), String> {
         self.prepare_write().await?;
         self.write(json!({ "op": "remove", "id": id, "prefix": prefix }))
@@ -700,6 +707,20 @@ fn apply_op(tree: &mut Json, op: &Json) -> Result<(), String> {
             }
             check_prefix(item, &prefix)?;
         }
+        Some("move") => {
+            let target = op["target"].as_i64().ok_or("move without a target")?;
+            check_prefix(find_mut(tree, id).ok_or("no such entry")?, &prefix)?;
+            check_prefix(find_mut(tree, target).ok_or("no such entry")?, &prefix)?;
+            if id == target {
+                return Ok(());
+            }
+            let item = take(tree, id).ok_or("no such entry")?;
+            let mut item = Some(item);
+            place_near(tree, target, op["after"].as_bool().unwrap_or(false), &mut item);
+            if item.is_some() {
+                return Err("move target vanished".into());
+            }
+        }
         Some("remove") => {
             check_prefix(find_mut(tree, id).ok_or("no such entry")?, &prefix)?;
             remove_id(tree, id);
@@ -733,6 +754,47 @@ fn replay(base: &Json, ops: Vec<Json>) -> (Json, Vec<Json>) {
         }
     }
     (tree, kept)
+}
+
+/// Remove entry `id` from wherever it is and return it.
+fn take(node: &mut Json, id: i64) -> Option<Json> {
+    match node {
+        Json::Array(items) => {
+            if let Some(pos) = items.iter().position(|i| i["id"].as_i64() == Some(id) && i.get("url").is_some()) {
+                return Some(items.remove(pos));
+            }
+            items.iter_mut().find_map(|i| take(i, id))
+        }
+        Json::Object(o) => o.get_mut("children").and_then(|c| take(c, id)),
+        _ => None,
+    }
+}
+
+/// Insert `item` next to entry `target`, in the same folder. Leaves it in
+/// `item` when the target isn't found.
+fn place_near(node: &mut Json, target: i64, after: bool, item: &mut Option<Json>) {
+    match node {
+        Json::Array(items) => {
+            if let Some(pos) = items.iter().position(|i| i["id"].as_i64() == Some(target)) {
+                if let Some(it) = item.take() {
+                    items.insert(if after { pos + 1 } else { pos }, it);
+                }
+                return;
+            }
+            for i in items.iter_mut() {
+                if item.is_none() {
+                    return;
+                }
+                place_near(i, target, after, item);
+            }
+        }
+        Json::Object(o) => {
+            if let Some(c) = o.get_mut("children") {
+                place_near(c, target, after, item);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn has_id(node: &Json, id: i64) -> bool {
@@ -794,6 +856,29 @@ mod tests {
         let mut out = vec![];
         collect(&tree, "b_", &mut out);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn moving_entries() {
+        let px = json!(["b_"]);
+        let mut tree = json!([{ "id": 1, "title": "[xbs] Other", "children": [
+            { "id": 2, "title": "b_a", "url": "https://a" },
+            { "id": 3, "title": "b_b", "url": "https://b" },
+            { "id": 4, "title": "b_c", "url": "https://c" },
+            { "id": 5, "title": "p_secret", "url": "https://p" }
+        ]}]);
+        let order = |t: &Json| {
+            let mut out = vec![];
+            collect(t, "b_", &mut out);
+            out.iter().map(|e| e["name"].as_str().unwrap().to_string()).collect::<Vec<_>>().join("")
+        };
+        apply_op(&mut tree, &json!({ "op": "move", "id": 4, "target": 2, "after": false, "prefix": px })).unwrap();
+        assert_eq!(order(&tree), "cab");
+        apply_op(&mut tree, &json!({ "op": "move", "id": 4, "target": 3, "after": true, "prefix": px })).unwrap();
+        assert_eq!(order(&tree), "abc");
+        // Can't move, or move next to, another plugin's entries.
+        assert!(apply_op(&mut tree, &json!({ "op": "move", "id": 5, "target": 2, "prefix": px })).is_err());
+        assert!(apply_op(&mut tree, &json!({ "op": "move", "id": 2, "target": 5, "prefix": px })).is_err());
     }
 
     #[test]

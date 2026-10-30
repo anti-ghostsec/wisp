@@ -287,6 +287,7 @@ fn api_prelude(p: &Plugin) -> String {
       add: (entry) => call("sync.add", {{ entry }}),
       update: (id, fields) => call("sync.update", {{ id, fields }}),
       remove: (id) => call("sync.remove", {{ id }}),
+      move: (id, target, after = false) => call("sync.move", {{ id, target, after }}),
       status: () => call("sync.status"),
     }}),
     tabs: Object.freeze({{ open: (url) => call("tabs.open", {{ url }}) }}),
@@ -696,6 +697,12 @@ impl PluginHost {
             "remove" => {
                 let id = args["id"].as_i64().ok_or("missing \"id\"")?;
                 self.sync.remove(id, prefixes).await?;
+                Ok(Json::Null)
+            }
+            "move" => {
+                let id = args["id"].as_i64().ok_or("missing \"id\"")?;
+                let target = args["target"].as_i64().ok_or("missing \"target\"")?;
+                self.sync.move_entry(id, target, args["after"].as_bool().unwrap_or(false), prefixes).await?;
                 Ok(Json::Null)
             }
             "status" => Ok(match self.sync.account() {
