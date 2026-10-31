@@ -38,6 +38,11 @@ pub struct Shared {
     /// Hosts the user explicitly allowed to load over plain HTTP this session.
     http_allowed: RefCell<HashSet<String>>,
     views: RefCell<Vec<glib::WeakRef<WebView>>>,
+    /// With `shared_web_process`, the views new tabs and new plugin views
+    /// share a web process with. Plugins get one of their own, so a page
+    /// busy loading in a tab doesn't hold up their buttons and pop-ups.
+    tab_anchor: RefCell<glib::WeakRef<WebView>>,
+    plugin_anchor: RefCell<glib::WeakRef<WebView>>,
     downloads: Rc<Downloads>,
     /// Optional history and saved tabs.
     pub state: Rc<Store>,
@@ -79,7 +84,7 @@ impl PluginUi for UiBridge {
 
     fn hidden_view(&self) -> WebView {
         let shared = self.0.upgrade().expect("plugins outlive the browser");
-        let view = shared.new_web_view(None);
+        let view = shared.new_web_view(None, true);
         shared.views.borrow_mut().push(view.downgrade());
         view
     }
@@ -159,6 +164,8 @@ impl Shared {
             popup_allowed: RefCell::new(HashSet::new()),
             http_allowed: RefCell::new(HashSet::new()),
             views: RefCell::new(Vec::new()),
+            tab_anchor: RefCell::default(),
+            plugin_anchor: RefCell::default(),
             downloads: Downloads::new(),
             state: Store::new(),
             session_save_queued: Cell::new(false),
@@ -335,9 +342,12 @@ impl Shared {
 
     /// A web view with Wisp's session, settings and plugins, sharing the web
     /// process of `related` (or of the other tabs, when that's configured).
-    fn new_web_view(&self, related: Option<&WebView>) -> WebView {
-        let anchor = related.cloned().or_else(|| if self.config.borrow().shared_web_process { self.anchor_view() } else { None });
-        match &anchor {
+    fn new_web_view(&self, related: Option<&WebView>, plugin: bool) -> WebView {
+        self.views.borrow_mut().retain(|w| w.upgrade().is_some());
+        let shared = self.config.borrow().shared_web_process;
+        let slot = if plugin { &self.plugin_anchor } else { &self.tab_anchor };
+        let anchor = related.cloned().or_else(|| if shared { slot.borrow().upgrade() } else { None });
+        let view = match &anchor {
             // The builder does not inherit the content manager from the related
             // view (only webkit_web_view_new_with_related_view does), so pass it
             // explicitly or plugins silently miss every tab but the first.
@@ -352,7 +362,11 @@ impl Shared {
                 .user_content_manager(&self.ucm)
                 .settings(&self.settings)
                 .build(),
+        };
+        if shared && anchor.is_none() {
+            slot.borrow().set(Some(&view));
         }
+        view
     }
 
     /// All plugins in the user's order (☰ menu); ones never placed keep
@@ -628,12 +642,6 @@ impl Shared {
     }
 
     /// Any live view, used as `related-view` so new tabs share its web process.
-    fn anchor_view(&self) -> Option<WebView> {
-        let mut views = self.views.borrow_mut();
-        views.retain(|w| w.upgrade().is_some());
-        views.first().and_then(|w| w.upgrade())
-    }
-
     fn rewrite(&self, uri: &str) -> Option<String> {
         let allowed = self.http_allowed.borrow();
         privacy::rewrite_url(uri, &self.config.borrow(), |h| allowed.contains(h))
@@ -1630,7 +1638,7 @@ impl BrowserWindow {
 
     fn create_view(self: &Rc<Self>, tab: &Rc<Tab>, related: Option<&WebView>) -> WebView {
         let shared = &self.shared;
-        let view = shared.new_web_view(related);
+        let view = shared.new_web_view(related, false);
         view.set_vexpand(true);
         shared.views.borrow_mut().push(view.downgrade());
         self.connect_view(tab, &view);
@@ -2006,7 +2014,7 @@ impl BrowserWindow {
             }
             child = c.next_sibling();
         }
-        let view = self.shared.new_web_view(None);
+        let view = self.shared.new_web_view(None, true);
         self.shared.views.borrow_mut().push(view.downgrade());
         view.set_size_request(380, 300);
         let popover = gtk::Popover::builder().child(&view).build();

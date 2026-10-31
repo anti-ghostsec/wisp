@@ -51,7 +51,8 @@ it from there.
 ## Low memory use
 
 - **One process**: windows share a single UI process, and tabs share one web
-  process where WebKit allows it (`shared_web_process`).
+  process where WebKit allows it (`shared_web_process`). Plugins share a
+  second one, so a page that's busy loading doesn't hold up their buttons.
 - **Tab suspension**: background tabs unload after `suspend_tabs_after_minutes`
   of inactivity. They keep their history and reload when you switch back.
 - **Memory limit**: each web process has a soft limit (`memory_limit_mb`).
