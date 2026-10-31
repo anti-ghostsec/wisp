@@ -2,7 +2,10 @@
    browser" pop-over and the floating "Share Feedback" button. (Its ads are
    turned off by Wisp's search address, k1=-1.) */
 [data-testid="serp-popover-promo"],
-[data-testid="floating-feedback-prompt"] { display: none !important; }
+[data-testid="floating-feedback-prompt"],
+/* The "Get Our Browser" card at the foot of the results: it has no name,
+   only its link marks it (…?origin=funnel_browser…). */
+.footer section:has(a[href*="origin=funnel_"]) { display: none !important; }
 
 /* Results use the width of the window instead of a narrow column with
    empty space beside it; a side panel (an answer box) keeps its room. */
