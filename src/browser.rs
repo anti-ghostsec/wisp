@@ -994,6 +994,19 @@ impl BrowserWindow {
                 win.view_of(&tab).grab_focus();
             }
         });
+        // The first click into the address bar selects the whole address,
+        // so typing replaces it; a click once it's focused places the cursor.
+        let click = gtk::GestureClick::new();
+        click.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let e = self.entry.clone();
+        click.connect_pressed(move |g, _, _, _| {
+            if !e.state_flags().contains(gtk::StateFlags::FOCUS_WITHIN) {
+                e.grab_focus();
+                e.select_region(0, -1);
+                g.set_state(gtk::EventSequenceState::Claimed);
+            }
+        });
+        self.entry.add_controller(click);
 
         let w = Rc::downgrade(self);
         self.notebook.connect_switch_page(move |_, page, _| {
