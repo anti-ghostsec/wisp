@@ -25,17 +25,29 @@
   #import-panel[hidden] { display: none; }
   #import-panel p { margin: .3em 0 .7em; }
   .hint { color: var(--muted); font-size: .9em; }
-  /* In the toolbar pop-up: compact, the site column narrower. */
-  .popup body { width: 36em; margin: .7em; padding: 0; }
+  .copy-user { display: none; }
+  /* In the toolbar pop-up each login is a small block instead of a table
+     row: site and user, then the password and the buttons, all in reach. */
+  .popup body { width: auto; max-width: none; margin: .7em; padding: 0; }
   .popup h1 { font-size: 1.15em; font-weight: 500; flex: none; }
-  .popup #q { width: auto; flex: 1; min-width: 0; padding: .35em .6em; }
-  .popup header { gap: .4em; flex-wrap: nowrap; }
-  .popup header button { padding: .25em .5em; }
+  .popup header { gap: .4em .3em; flex-wrap: wrap; }
+  .popup h1 { flex: 1; }
+  .popup #q { order: 9; flex: 1 1 100%; width: auto; min-width: 0; padding: .35em .6em; box-sizing: border-box; }
+  .popup header button { padding: .25em .45em; }
   .popup #status { margin: .5em 0 0; }
-  .popup table { margin-top: .4em; }
-  .popup td, .popup th { padding: .35em .3em; }
-  .popup td button { padding: .2em .35em; }
-  .popup th:nth-child(1) { width: 25%; } .popup th:nth-child(2) { width: 25%; } .popup th:nth-child(3) { width: 20%; }
+  .popup thead { display: none; }
+  .popup table, .popup tbody { display: block; margin-top: .3em; }
+  .popup tr { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: .15em .5em; padding: .5em .1em; border-bottom: 1px solid var(--line); }
+  .popup td { display: flex; align-items: center; gap: .2em; padding: 0; border: 0; min-width: 0; }
+  .popup td > span, .popup td > a, .popup td > code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text; }
+  .popup td:nth-child(1) { grid-column: 1 / -1; font-weight: 500; }
+  .popup td:nth-child(2) { grid-column: 1; color: var(--muted); }
+  .popup td:nth-child(3) { grid-column: 1; }
+  .popup td.actions { grid-column: 2; grid-row: 2 / span 2; flex-direction: column; align-items: stretch; }
+  .popup td button { padding: .2em .45em; }
+  .popup .copy-user { display: inline-block; }
+  .popup tr.editing td { grid-column: 1 / -1; grid-row: auto; flex-direction: row; justify-content: flex-end; }
+  .popup tr.editing td input { flex: 1; }
   #full { display: none; }
   .popup #full { display: inline-block; }
 </style>

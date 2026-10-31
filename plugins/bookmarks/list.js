@@ -5,7 +5,8 @@
   // Opened from the toolbar button it's a pop-up (Wisp adds ?tab=).
   const popup = new URLSearchParams(location.search).has("tab");
   document.documentElement.classList.toggle("popup", popup);
-  const fullPage = () => { wisp.tabs.open(location.origin + location.pathname); window.close(); };
+  // Plugin pages have no origin ("null"), so the address is the href without ?tab=.
+  const fullPage = () => wisp.tabs.open(location.href.split(/[?#]/)[0]).finally(() => window.close());
   $("#full").onclick = fullPage;
 
   // Shown in their saved order, which is also the bookmarks bar's order.

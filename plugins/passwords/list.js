@@ -7,7 +7,8 @@
   // Opened from the toolbar button it's a pop-up (Wisp adds ?tab=).
   const popup = new URLSearchParams(location.search).has("tab");
   document.documentElement.classList.toggle("popup", popup);
-  const fullPage = () => { wisp.tabs.open(location.origin + location.pathname); window.close(); };
+  // Plugin pages have no origin ("null"), so the address is the href without ?tab=.
+  const fullPage = () => wisp.tabs.open(location.href.split(/[?#]/)[0]).finally(() => window.close());
   $("#full").onclick = fullPage;
 
   // With the port, which tells local servers apart (localhost:8450).
@@ -67,6 +68,7 @@
 
   const editRow = (entry) => {
     const tr = document.createElement("tr");
+    tr.className = "editing";
     const site = input(entry ? entry.url : "", "https://example.com");
     const user = input(entry ? entry.username : "", "Username or email");
     const pw = input(entry ? entry.password : "", "Password");
@@ -111,9 +113,10 @@
     actions.className = "actions";
     const site = Object.assign(document.createElement("a"), { href: e.url, textContent: e.site, target: "_blank" });
     if (popup) site.onclick = (ev) => { ev.preventDefault(); wisp.tabs.go(e.url).then(() => window.close()); };
-    const user = cell(e.username);
-    user.title = "Double-click to copy";
-    user.ondblclick = () => wisp.clipboard.write(e.username).then(() => status("Username copied"), (err) => status("Copy failed: " + err.message));
+    const copyUser = () => wisp.clipboard.write(e.username).then(() => status("Username copied"), (err) => status("Copy failed: " + err.message));
+    const name = Object.assign(document.createElement("span"), { textContent: e.username, title: "Double-click to copy" });
+    name.ondblclick = copyUser;
+    const user = e.username ? cell(name, button("Copy", copyUser, "copy-user")) : cell();
     tr.append(cell(site), user, cell(code, show, copy), actions);
     return tr;
   };

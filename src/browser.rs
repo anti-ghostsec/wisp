@@ -1148,7 +1148,7 @@ impl BrowserWindow {
         self.window.add_action(&action);
     }
 
-    fn run_plugin_action(self: &Rc<Self>, plugin_id: &str, action_id: &str) {
+    pub fn run_plugin_action(self: &Rc<Self>, plugin_id: &str, action_id: &str) {
         let Some(p) = self.shared.plugins.get(plugin_id).filter(|p| p.enabled.get()) else { return };
         let Some(action) = p.manifest.actions.iter().find(|a| a.id == action_id) else { return };
         if let Some(page) = &action.page {
@@ -2031,7 +2031,9 @@ impl BrowserWindow {
         let view = self.shared.new_web_view(None, true);
         self.shared.views.borrow_mut().push(view.downgrade());
         view.set_size_request(380, 300);
-        let popover = gtk::Popover::builder().child(&view).build();
+        // Toolbar buttons sit at the window's right edge: the pop-up opens
+        // leftward from its button so none of it ends up off the screen.
+        let popover = gtk::Popover::builder().child(&view).halign(gtk::Align::End).build();
         popover.set_parent(&anchor);
         let tab = self.current_tab().map_or(0, |t| t.id);
         view.load_uri(&format!("{}?tab={tab}", p.page_url(page)));

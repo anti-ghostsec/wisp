@@ -91,6 +91,11 @@ fn main() -> glib::ExitCode {
             let secs = std::env::var("WISP_SCREENSHOT_DELAY").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
             window.screenshot_and_quit(path, std::time::Duration::from_secs(secs));
         }
+        // For testing pop-ups: WISP_OPEN_ACTION=plugin/action presses that button.
+        if let Some((plugin, action)) = std::env::var("WISP_OPEN_ACTION").ok().and_then(|a| a.split_once('/').map(|(p, a)| (p.to_string(), a.to_string()))) {
+            let w = window.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_secs(3), move || w.run_plugin_action(&plugin, &action));
+        }
         glib::ExitCode::SUCCESS
     });
     // Write history that hasn't been saved yet.
