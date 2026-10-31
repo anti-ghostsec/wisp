@@ -2064,6 +2064,21 @@ impl BrowserWindow {
             fit(&v);
             glib::ControlFlow::Continue
         });
+        // Right-click "Open in New Tab", and links that ask for a new
+        // window, open web pages as background tabs, as they do in a tab.
+        let w = Rc::downgrade(self);
+        view.connect_context_menu(move |_, menu, hit| {
+            if let Some(win) = w.upgrade() {
+                win.adjust_link_menu(menu, hit);
+            }
+            false
+        });
+        let w = Rc::downgrade(self);
+        view.connect_create(move |_, action| {
+            let uri = action.request().and_then(|r| r.uri()).filter(|u| u.starts_with("https://") || u.starts_with("http://"))?;
+            w.upgrade()?.new_tab(Some(&uri), None, false);
+            None
+        });
         // window.close() in the page closes the popup.
         let po = popover.clone();
         view.connect_close(move |_| po.popdown());

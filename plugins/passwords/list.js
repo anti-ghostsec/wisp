@@ -112,7 +112,13 @@
     );
     actions.className = "actions";
     const site = Object.assign(document.createElement("a"), { href: e.url, textContent: e.site, target: "_blank" });
-    if (popup) site.onclick = (ev) => { ev.preventDefault(); wisp.tabs.go(e.url).then(() => window.close()); };
+    if (popup) {
+      site.onclick = (ev) => {
+        ev.preventDefault();
+        (ev.ctrlKey || ev.metaKey ? wisp.tabs.open(e.url) : wisp.tabs.go(e.url)).then(() => window.close());
+      };
+      site.onauxclick = (ev) => { if (ev.button === 1) { ev.preventDefault(); wisp.tabs.open(e.url); } };
+    }
     const copyUser = () => wisp.clipboard.write(e.username).then(() => status("Username copied"), (err) => status("Copy failed: " + err.message));
     const name = Object.assign(document.createElement("span"), { textContent: e.username, title: "Double-click to copy" });
     name.ondblclick = copyUser;
