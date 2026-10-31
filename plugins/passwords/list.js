@@ -4,6 +4,11 @@
   const DOTS = "••••••••";
   let all = [];
   let editing = null;
+  // Opened from the toolbar button it's a pop-up (Wisp adds ?tab=).
+  const popup = new URLSearchParams(location.search).has("tab");
+  document.documentElement.classList.toggle("popup", popup);
+  const fullPage = () => { wisp.tabs.open(location.origin + location.pathname); window.close(); };
+  $("#full").onclick = fullPage;
 
   // With the port, which tells local servers apart (localhost:8450).
   const hostOf = (url) => { try { return new URL(url).host; } catch { return ""; } };
@@ -105,6 +110,7 @@
     );
     actions.className = "actions";
     const site = Object.assign(document.createElement("a"), { href: e.url, textContent: e.site, target: "_blank" });
+    if (popup) site.onclick = (ev) => { ev.preventDefault(); wisp.tabs.go(e.url).then(() => window.close()); };
     const user = cell(e.username);
     user.title = "Double-click to copy";
     user.ondblclick = () => wisp.clipboard.write(e.username).then(() => status("Username copied"), (err) => status("Copy failed: " + err.message));
@@ -127,6 +133,8 @@
   let incoming = null;
   const key = (l) => hostOf(l.url).replace(/^www\./, "") + "\n" + l.username;
   $("#import").onclick = () => {
+    // A file chooser would close the pop-up (and the page with it): import in a tab.
+    if (popup) return fullPage();
     $("#import-hint").hidden = false;
     $("#file").click();
   };
@@ -186,6 +194,11 @@
   const load = async () => {
     try {
       all = (await wisp.sync.list("p_")).map(toEntry).sort((a, b) => a.site.localeCompare(b.site));
+      // In the pop-up, start with the logins for the site you're on.
+      if (popup && !$("#q").value) {
+        const here = hostOf((await wisp.tabs.current())?.url || "").replace(/^www\./, "");
+        if (here && all.some((e) => e.site.replace(/^www\./, "") === here)) $("#q").value = here;
+      }
       render();
     } catch (err) {
       status("Could not load passwords: " + err.message);

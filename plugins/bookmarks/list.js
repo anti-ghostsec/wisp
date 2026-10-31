@@ -2,6 +2,11 @@
 (() => {
   const $ = (s) => document.querySelector(s);
   let all = [];
+  // Opened from the toolbar button it's a pop-up (Wisp adds ?tab=).
+  const popup = new URLSearchParams(location.search).has("tab");
+  document.documentElement.classList.toggle("popup", popup);
+  const fullPage = () => { wisp.tabs.open(location.origin + location.pathname); window.close(); };
+  $("#full").onclick = fullPage;
 
   // Shown in their saved order, which is also the bookmarks bar's order.
   // Drag a row by its handle to move it; the first row is the bar's first.
@@ -94,6 +99,15 @@
       li.dataset.id = b.id;
       const a = document.createElement("a");
       a.href = b.url;
+      // From the pop-up a bookmark opens in the tab you're on (Ctrl or
+      // middle click: in a new one), and the pop-up goes away.
+      if (popup) {
+        a.onclick = (ev) => {
+          ev.preventDefault();
+          (ev.ctrlKey || ev.metaKey ? wisp.tabs.open(b.url) : wisp.tabs.go(b.url)).then(() => window.close());
+        };
+        a.onauxclick = (ev) => { if (ev.button === 1) { ev.preventDefault(); wisp.tabs.open(b.url); } };
+      }
       const name = document.createElement("span");
       name.textContent = b.name || b.url;
       const url = document.createElement("small");
@@ -124,7 +138,9 @@
     try {
       all = await wisp.sync.list("b_");
       const s = await wisp.sync.status();
-      $("#status").textContent = s.configured
+      $("#status").textContent = popup
+        ? (all.length ? "" : " ")
+        : s.configured
         ? `${all.length} bookmark${all.length === 1 ? "" : "s"} · synced with ${new URL(s.service).host} · drag ⠿ to reorder; the top ones come first on the bookmarks bar`
         : "";
       render();
@@ -149,7 +165,8 @@
     const doc = new DOMParser().parseFromString(text, "text/html");
     return [...doc.querySelectorAll("a[href]")].map((a) => ({ title: a.textContent.trim(), url: a.getAttribute("href") }));
   };
-  $("#import").onclick = () => $("#file").click();
+  // A file chooser would close the pop-up (and the page with it): import in a tab.
+  $("#import").onclick = () => (popup ? fullPage() : $("#file").click());
   $("#file").onchange = async () => {
     const file = $("#file").files[0];
     $("#file").value = "";

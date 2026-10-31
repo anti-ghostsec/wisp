@@ -1,0 +1,5 @@
+/* DuckDuckGo's own clutter on its search pages: the "Upgrade to our
+   browser" pop-over and the floating "Share Feedback" button. (Its ads are
+   turned off by Wisp's search address, k1=-1.) */
+[data-testid="serp-popover-promo"],
+[data-testid="floating-feedback-prompt"] { display: none !important; }

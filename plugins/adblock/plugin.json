@@ -8,5 +8,8 @@
     { "name": "EasyList", "url": "https://easylist.to/easylist/easylist.txt" },
     { "name": "EasyPrivacy", "url": "https://easylist.to/easylist/easyprivacy.txt" },
     { "name": "uBlock Badware risks", "url": "https://ublockorigin.github.io/uAssets/filters/badware.txt" }
+  ],
+  "content_scripts": [
+    { "matches": ["https://duckduckgo.com/*"], "css": ["duckduckgo.css"], "run_at": "document_start" }
   ]
 }

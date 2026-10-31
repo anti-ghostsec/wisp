@@ -240,6 +240,8 @@ pub trait PluginUi {
     fn views(&self) -> Vec<WebView>;
     /// { id, url, title } of the current tab.
     fn current_tab(&self) -> Json;
+    /// Load a URL in the current tab.
+    fn go(&self, url: &str);
     /// Start a download (the user picks where it goes, as usual).
     fn download(&self, url: &str);
     /// Open a file or folder with the system's app for it.
@@ -399,6 +401,7 @@ fn api_prelude(p: &Plugin, gpu_compositing: bool) -> String {
     tabs: Object.freeze({{
       open: (url) => call("tabs.open", {{ url }}),
       current: () => call("tabs.current"),
+      go: (url) => call("tabs.go", {{ url }}),
     }}),
     notify: (title, body = "") => call("notify", {{ title, body }}),
     log: (...parts) => call("log", {{ message: parts.map(String).join(" ") }}),
@@ -948,6 +951,17 @@ impl PluginHost {
                 // The plugin's own pages (settings, lists) are shown right away.
                 if let Some(ui) = self.ui.borrow().clone() {
                     ui.open_tab(url, own_page);
+                }
+                Ok(Json::Null)
+            }
+            ("tabs", "go") => {
+                need("tabs")?;
+                let url = args["url"].as_str().ok_or("missing \"url\"")?;
+                if !(url.starts_with("https://") || url.starts_with("http://")) {
+                    return Err("tabs.go only accepts http(s) URLs".into());
+                }
+                if let Some(ui) = self.ui.borrow().clone() {
+                    ui.go(url);
                 }
                 Ok(Json::Null)
             }

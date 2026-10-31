@@ -7,7 +7,7 @@
   "sync_prefixes": ["b_"],
   "actions": [
     { "id": "toggle", "label": "Bookmark this page", "icon": "icons/star-symbolic.svg", "shortcut": "<Ctrl>d" },
-    { "id": "list", "label": "Bookmarks", "icon": "icons/bookmarks-symbolic.svg", "shortcut": "<Ctrl><Shift>o", "page": "list.html" }
+    { "id": "list", "label": "Bookmarks", "icon": "icons/bookmarks-symbolic.svg", "shortcut": "<Ctrl><Shift>o", "popup": "list.html" }
   ],
   "content_scripts": [
     { "matches": ["*://*/*"], "js": ["toast.js", "star.js"], "run_at": "document_end" },

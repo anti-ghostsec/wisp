@@ -101,6 +101,16 @@ impl PluginUi for UiBridge {
         }
     }
 
+    fn go(&self, url: &str) {
+        let Some(win) = self.0.upgrade().and_then(|s| s.last_window()) else { return };
+        match win.current_tab() {
+            Some(tab) => win.view_of(&tab).load_uri(url),
+            None => {
+                win.new_tab(Some(url), None, true);
+            }
+        }
+    }
+
     fn download(&self, url: &str) {
         if let Some(shared) = self.0.upgrade() {
             shared.session.download_uri(url);
@@ -650,6 +660,10 @@ impl Shared {
     /// Turn what the user typed into a URI.
     fn resolve_input(&self, text: &str) -> String {
         let t = text.trim();
+        // "ai what is…" asks Duck.ai instead of searching.
+        if let Some(q) = t.strip_prefix("ai ").map(str::trim).filter(|q| !q.is_empty()) {
+            return format!("https://duckduckgo.com/?q={}&ia=chat", glib::Uri::escape_string(q, None, false));
+        }
         let has_scheme = t.contains("://")
             || ["about:", "wisp:", "data:", "file:", "view-source:"].iter().any(|s| t.starts_with(s));
         if has_scheme {

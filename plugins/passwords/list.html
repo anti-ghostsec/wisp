@@ -25,12 +25,26 @@
   #import-panel[hidden] { display: none; }
   #import-panel p { margin: .3em 0 .7em; }
   .hint { color: var(--muted); font-size: .9em; }
+  /* In the toolbar pop-up: compact, the site column narrower. */
+  .popup body { width: 36em; margin: .7em; padding: 0; }
+  .popup h1 { font-size: 1.15em; font-weight: 500; flex: none; }
+  .popup #q { width: auto; flex: 1; min-width: 0; padding: .35em .6em; }
+  .popup header { gap: .4em; flex-wrap: nowrap; }
+  .popup header button { padding: .25em .5em; }
+  .popup #status { margin: .5em 0 0; }
+  .popup table { margin-top: .4em; }
+  .popup td, .popup th { padding: .35em .3em; }
+  .popup td button { padding: .2em .35em; }
+  .popup th:nth-child(1) { width: 25%; } .popup th:nth-child(2) { width: 25%; } .popup th:nth-child(3) { width: 20%; }
+  #full { display: none; }
+  .popup #full { display: inline-block; }
 </style>
 <header>
-  <h1>Saved passwords</h1>
+  <h1>Passwords</h1>
   <input id="q" type="search" placeholder="Search" autofocus>
   <button id="add">Add</button>
   <button id="import">Import…</button>
+  <button id="full" title="Open the passwords in a tab">⤢</button>
   <input id="file" type="file" accept=".csv,.json,text/csv,application/json" hidden>
 </header>
 <div id="import-panel" hidden>

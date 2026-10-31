@@ -6,7 +6,7 @@
   "permissions": ["sync", "storage", "tabs", "clipboard"],
   "sync_prefixes": ["p_"],
   "actions": [
-    { "id": "list", "label": "Saved passwords", "icon": "icons/key-symbolic.svg", "page": "list.html" }
+    { "id": "list", "label": "Saved passwords", "icon": "icons/key-symbolic.svg", "popup": "list.html" }
   ],
   "context_menu": [
     { "id": "fill", "label": "Fill saved login…", "contexts": ["editable"] },

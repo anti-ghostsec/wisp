@@ -81,7 +81,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             homepage: "wisp:start".into(),
-            search_url: "https://html.duckduckgo.com/html/?q=%s".into(),
+            search_url: SEARCH_URL.into(),
             persistent_profile: false,
             https_only: true,
             strip_tracking_params: true,
@@ -126,6 +126,11 @@ pub fn cache_dir() -> PathBuf {
     glib::user_cache_dir().join(APP_NAME)
 }
 
+/// DuckDuckGo with its ads turned off (k1=-1).
+const SEARCH_URL: &str = "https://duckduckgo.com/?q=%s&k1=-1";
+/// What Wisp searched with before: the no-script page, ads and all.
+const OLD_SEARCH_URL: &str = "https://html.duckduckgo.com/html/?q=%s";
+
 impl Config {
     fn path() -> PathBuf {
         config_dir().join("config.json")
@@ -134,7 +139,7 @@ impl Config {
     pub fn load() -> Config {
         let path = Self::path();
         match fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
+            Ok(text) => serde_json::from_str(&text).map(Config::upgrade).unwrap_or_else(|e| {
                 eprintln!("wisp: {}: {e}; using defaults", path.display());
                 // Keep the broken file around instead of silently overwriting it later.
                 let _ = fs::rename(&path, path.with_extension("json.bak"));
@@ -146,6 +151,15 @@ impl Config {
                 cfg
             }
         }
+    }
+
+    /// Settings still at an old default move to the new one.
+    fn upgrade(mut self) -> Config {
+        if self.search_url == OLD_SEARCH_URL {
+            self.search_url = SEARCH_URL.into();
+            self.save();
+        }
+        self
     }
 
     pub fn save(&self) {

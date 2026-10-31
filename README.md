@@ -46,7 +46,9 @@ it from there.
 - **Permissions**: geolocation, camera, microphone and notification requests
   are denied.
 - **Fingerprinting**: the `fingerprint-shield` plugin reports uniform device values.
-- **Search**: the default engine is DuckDuckGo's HTML version.
+- **Search**: the default engine is DuckDuckGo with its ads turned off
+  (`k1=-1`); its upgrade pop-over and feedback button are hidden. Type
+  `ai` and a question in the address bar to ask Duck.ai instead.
 
 ## Low memory use
 

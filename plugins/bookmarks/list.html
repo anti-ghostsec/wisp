@@ -22,7 +22,19 @@
   li.over-bottom { box-shadow: inset 0 -2px 0 #3a6ee8; }
   li.editing input { width: auto; flex: 1; }
   button.main { background: #3a6ee8; color: #fff; }
+  /* In the toolbar pop-up: compact, and a list you can scroll. */
+  .popup body { width: 26em; margin: .7em; padding: 0; }
+  .popup h1 { font-size: 1.15em; font-weight: 500; }
+  .popup header { gap: .5em; }
+  .popup input#q { width: auto; flex: 1; min-width: 0; padding: .35em .6em; }
+  .popup header h1 { flex: none; }
+  .popup #status { margin: .5em 0; }
+  .popup ul { margin: 0; }
+  .popup li { padding: .35em .2em; gap: .4em; }
+  .popup li button { padding: .2em .35em; }
+  #full { display: none; }
+  .popup #full { display: inline-block; }
 </style>
-<header><h1>Bookmarks</h1><input id="q" placeholder="Search bookmarks" autofocus><button id="import" title="Import an HTML bookmarks export from Firefox, Chrome, Edge, Brave or Safari">Import…</button><input id="file" type="file" accept=".html,.htm,.json" hidden></header>
+<header><h1>Bookmarks</h1><input id="q" placeholder="Search bookmarks" autofocus><button id="full" title="Open the bookmarks in a tab">⤢</button><button id="import" title="Import an HTML bookmarks export from Firefox, Chrome, Edge, Brave or Safari">Import…</button><input id="file" type="file" accept=".html,.htm,.json" hidden></header>
 <p id="status">Loading…</p>
 <ul id="list"></ul>
