@@ -3,3 +3,9 @@
    turned off by Wisp's search address, k1=-1.) */
 [data-testid="serp-popover-promo"],
 [data-testid="floating-feedback-prompt"] { display: none !important; }
+
+/* Results use the width of the window instead of a narrow column with
+   empty space beside it; a side panel (an answer box) keeps its room. */
+[data-area="mainline"] { max-width: none !important; flex: 1 1 auto !important; min-width: 0; }
+[data-area="sidebar"]:not(:has(li > *)) { display: none !important; }
+[data-area="sidebar"] { flex-shrink: 0 !important; }
