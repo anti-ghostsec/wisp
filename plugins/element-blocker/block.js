@@ -6,16 +6,25 @@
   const site = location.hostname.replace(/^www\./, "");
   let rules = [];
 
+  // Pages with a strict Content-Security-Policy (style-src 'self') block
+  // <style> elements, even in a shadow root; constructed sheets aren't.
+  const sheet = (css) => {
+    const s = new CSSStyleSheet();
+    s.replaceSync(css);
+    return s;
+  };
+
   // ---- applying the rules ----
-  const style = document.createElement("style");
+  const style = sheet("");
   const apply = () => {
     const hide = rules.map((r) => r.s).filter(valid);
     const unlock = rules.some((r) => r.unlock);
-    style.textContent =
+    style.replaceSync(
       (hide.length ? hide.join(",\n") + " { display: none !important; }\n" : "") +
-      // A blocked overlay often leaves the page unscrollable behind it.
-      (unlock ? "html, body { overflow: auto !important; }\n" : "");
-    if (!style.isConnected) (document.head || document.documentElement).append(style);
+        // A blocked overlay often leaves the page unscrollable behind it.
+        (unlock ? "html, body { overflow: auto !important; }\n" : ""),
+    );
+    if (!document.adoptedStyleSheets.includes(style)) document.adoptedStyleSheets = [...document.adoptedStyleSheets, style];
   };
   const valid = (s) => {
     try {
@@ -40,7 +49,7 @@
     apply();
   };
   load();
-  // Pages that replace <head> wholesale would drop the style.
+  // Pages that set their own adopted sheets would drop ours.
   document.addEventListener("DOMContentLoaded", () => rules.length && apply());
 
   // ---- picking ----
@@ -86,7 +95,7 @@
     if (picker) return;
     const host = document.createElement("wisp-element-picker");
     const root = host.attachShadow({ mode: "closed" });
-    root.innerHTML = `<style>
+    root.adoptedStyleSheets = [sheet(`
       :host { all: initial; }
       .box { position: fixed; pointer-events: none; z-index: 2147483647; background: #3a6ee833;
              outline: 2px solid #3a6ee8; border-radius: 2px; transition: all 60ms linear; }
@@ -103,7 +112,8 @@
       button:hover { background: #fff3; }
       button.main { background: #3a6ee8; color: #fff; }
       .hint { color: #999; font-size: 11.5px; }
-    </style>
+    `)];
+    root.innerHTML = `
     <div class="box"></div>
     <div class="panel">
       <div class="row"><b>Block element</b><span class="grow"></span></div>
@@ -245,12 +255,13 @@
   const undoToast = (rule) => {
     const host = document.createElement("wisp-element-picker");
     const root = host.attachShadow({ mode: "closed" });
-    root.innerHTML = `<style>
+    root.adoptedStyleSheets = [sheet(`
       div { position: fixed; right: 16px; bottom: 16px; z-index: 2147483647; font: 13px system-ui, sans-serif; color: #eee;
             background: #242424f2; border-radius: 10px; box-shadow: 0 6px 24px #0008; padding: 10px 12px;
             display: flex; gap: 12px; align-items: center; }
       button { font: inherit; color: #8ab4ff; background: none; border: 0; cursor: pointer; padding: 0; }
-    </style><div><span></span><button>Undo</button></div>`;
+    `)];
+    root.innerHTML = `<div><span></span><button>Undo</button></div>`;
     root.querySelector("span").textContent = "Blocked on " + site;
     root.querySelector("button").onclick = async () => {
       host.remove();

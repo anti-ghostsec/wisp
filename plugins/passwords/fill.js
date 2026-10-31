@@ -14,6 +14,14 @@
     isLocal(h.replace(/:\d+$/, "")) ? h : h.split(".").slice(/\.(co|com|org|net|gov|ac|edu|ne|or)\.[a-z]{2}$/.test(h) ? -3 : -2).join(".");
   const site = siteOf(host);
 
+  // Pages with a strict Content-Security-Policy (style-src 'self') block
+  // <style> elements, even in a shadow root; constructed sheets aren't.
+  const sheet = (css) => {
+    const s = new CSSStyleSheet();
+    s.replaceSync(css);
+    return s;
+  };
+
   // ---- finding fields ----
   const visible = (el) => el.isConnected && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
   const isPassword = (el) => el instanceof HTMLInputElement && el.type === "password";
@@ -153,7 +161,7 @@
   const panel = (css, build) => {
     const hostEl = document.createElement("div");
     const root = hostEl.attachShadow({ mode: "closed" });
-    root.innerHTML = `<style>
+    root.adoptedStyleSheets = [sheet(`
       .box { position: fixed; z-index: 2147483647; font: 13px system-ui, sans-serif; color: #eee;
              background: #222; border-radius: 8px; box-shadow: 0 4px 18px #0006; padding: 6px; ${css} }
       button { font: inherit; color: inherit; background: #333; border: 0; border-radius: 5px;
@@ -163,7 +171,7 @@
       .item small { opacity: .6; margin-left: 6px; }
       hr { border: 0; border-top: 1px solid #fff2; margin: 4px 2px; }
       p { margin: 4px 6px 8px; }
-    </style>`;
+    `)];
     const box = Object.assign(document.createElement("div"), { className: "box" });
     root.append(box);
     build(box, () => hostEl.remove());
@@ -234,9 +242,10 @@
     keyFor = field;
     keyButton = document.createElement("div");
     const root = keyButton.attachShadow({ mode: "closed" });
-    root.innerHTML = `<style>.key{all:initial;position:fixed;z-index:2147483647;display:flex;align-items:center;justify-content:center;
+    root.adoptedStyleSheets = [sheet(`.key{all:initial;position:fixed;z-index:2147483647;display:flex;align-items:center;justify-content:center;
       width:22px;height:22px;border-radius:5px;cursor:pointer;color:#555;background:#fffd;box-shadow:0 0 0 1px #0002}
-      .key:hover{color:#000;background:#fff}</style><div class="key" title="Passwords">${KEY_SVG}</div>`;
+      .key:hover{color:#000;background:#fff}`)];
+    root.innerHTML = `<div class="key" title="Passwords">${KEY_SVG}</div>`;
     const k = (keyEl = root.querySelector(".key"));
     k.onmousedown = (ev) => {
       ev.preventDefault();
