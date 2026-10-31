@@ -222,7 +222,12 @@ days; a yt-dlp already on `PATH` is used as is. It needs `python3`. With
 audio separately above 720p), MP3/M4A conversion and embedded metadata;
 without it, VidGrab downloads the best single-file version. When a site asks for a login,
 yt-dlp gets your cookies for that site in a private temporary file that's
-deleted when the download ends.
+deleted when the download ends. Its helper (a Python program that runs
+yt-dlp) starts only once you've allowed it, which Wisp asks the first time.
+**Extra yt-dlp arguments** in its settings take download, format, subtitle
+and file-name options only: ones that run programs or reach other files
+(`--exec`, `-o`, `--config-locations`, …) are refused, and the yt-dlp path
+must name a `yt-dlp` program.
 
 **Element Blocker** hides things the ad blocker misses, such as a
 newsletter pop-up or a "disable your ad blocker" wall. Nothing is blocked
@@ -233,4 +238,18 @@ that site from then on, and if it was an overlay that stopped the page from
 scrolling, scrolling works again. **Blocked elements** (in the ☰ menu)
 lists them by site to edit or remove.
 
-See [PLUGINS.md](PLUGINS.md) to write your own.
+A plugin you install with the same id as a built-in one doesn't replace it
+unless you choose **Use Mine Instead** when Wisp asks. See
+[PLUGINS.md](PLUGINS.md) to write your own.
+
+## Releases
+
+Every push to `main` that passes clippy (warnings count) and the tests is
+built on Debian trixie and published as the newest release, signed with
+minisign. FerroOS's updater installs a build only if its signature checks out
+against [minisign.pub](minisign.pub), it is the commit announced, and it is
+no older than the one installed. To check a download yourself:
+
+```sh
+minisign -Vm wisp-linux-x86_64.tar.gz -P RWS1Mw19uE/JOmQzjVNTTIz4ovqKsQOkMSWd9AU3s9+ZtFdMRe3qCd1P
+```

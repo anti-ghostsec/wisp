@@ -11,6 +11,8 @@ use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 use webkit6::prelude::*;
@@ -109,6 +111,31 @@ impl PluginUi for UiBridge {
             None => crate::launch::open(path),
         }
     }
+
+    fn native_allowed(&self, key: &str) -> bool {
+        self.0.upgrade().is_some_and(|s| s.config.borrow().allowed_native_helpers.iter().any(|k| k == key))
+    }
+
+    fn allow_native(&self, key: &str) {
+        if let Some(shared) = self.0.upgrade() {
+            let mut cfg = shared.config.borrow_mut();
+            cfg.allowed_native_helpers.push(key.to_string());
+            cfg.save();
+        }
+    }
+
+    fn ask(&self, message: String, detail: String, buttons: &[&str]) -> Pin<Box<dyn Future<Output = Option<i32>>>> {
+        let parent = self.0.upgrade().and_then(|s| s.app.active_window().or_else(|| s.last_window().map(|w| w.window.clone().upcast())));
+        let dialog = gtk::AlertDialog::builder()
+            .message(message)
+            .detail(detail)
+            .buttons(buttons)
+            .cancel_button(0)
+            .default_button(0)
+            .modal(true)
+            .build();
+        Box::pin(async move { dialog.choose_future(parent.as_ref()).await.ok() })
+    }
 }
 
 impl Shared {
@@ -205,7 +232,7 @@ impl Shared {
         let clear = |w: &gtk::Widget| MARKS.iter().for_each(|m| w.remove_css_class(m));
         let (handle, item) = (handle.clone().upcast::<gtk::Widget>(), item.clone().upcast::<gtk::Widget>());
         // (moving, current target and side)
-        let state: Rc<RefCell<(bool, Option<(gtk::Widget, bool)>)>> = Rc::new(RefCell::new((false, None)));
+        let state = Rc::new(RefCell::new((false, None::<(gtk::Widget, bool)>)));
         let gesture = gtk::GestureDrag::builder().button(1).build();
 
         let (st, me, it, h) = (state.clone(), Rc::downgrade(self), item.clone(), handle.clone());
@@ -242,15 +269,14 @@ impl Shared {
                 let mut child = c.first_child();
                 while let Some(ch) = child {
                     // The dragged item, or its twin on the bar or in the menu.
-                    if ch != it && ch.widget_name() != it.widget_name() && ch.is_visible() {
-                        if let Some(b) = ch.compute_bounds(c) {
+                    if ch != it && ch.widget_name() != it.widget_name() && ch.is_visible()
+                        && let Some(b) = ch.compute_bounds(c) {
                             let (start, len) = if zone.vertical { (b.y(), b.height()) } else { (b.x(), b.width()) };
                             if pos >= start && pos < start + len {
                                 let after = pos > start + len / 2.0;
                                 found = Some((ch.clone(), after, MARKS[zone.vertical as usize * 2 + after as usize]));
                             }
                         }
-                    }
                     child = ch.next_sibling();
                 }
                 // Past the last item of a list: after it.
@@ -547,6 +573,35 @@ impl Shared {
                 let keys: &[&str] = if p.enabled.get() { &[shortcut.as_str()] } else { &[] };
                 self.app.set_accels_for_action(&name, keys);
             }
+        }
+    }
+
+    /// Your own plugins left out for having a built-in plugin's id: say so,
+    /// and offer to use yours instead (from the next start).
+    pub fn ask_about_shadowed_plugins(self: &Rc<Self>) {
+        for (id, dir) in self.plugins.shadowed.clone() {
+            let builtin = self.plugins.get(&id).map(|p| p.manifest.name.clone()).unwrap_or_else(|| id.clone());
+            let dialog = gtk::AlertDialog::builder()
+                .message(format!("Using the built-in {builtin} plugin"))
+                .detail(format!(
+                    "{} has the same id (\"{id}\") as the built-in {builtin} plugin, so it was left out. A plugin with that id gets everything the built-in one has, such as your saved data for it.\n\nUse yours instead only if you made it or trust it. It takes effect the next time Wisp starts.",
+                    dir.display()
+                ))
+                .buttons(["Keep Built-in", "Use Mine Instead"])
+                .cancel_button(0)
+                .default_button(0)
+                .build();
+            let shared = self.clone();
+            let parent = self.last_window().map(|w| w.window.clone());
+            dialog.choose(parent.as_ref(), None::<&gio::Cancellable>, move |choice| {
+                if choice == Ok(1) {
+                    let mut cfg = shared.config.borrow_mut();
+                    if !cfg.plugin_overrides.contains(&id) {
+                        cfg.plugin_overrides.push(id);
+                        cfg.save();
+                    }
+                }
+            });
         }
     }
 
@@ -950,16 +1005,16 @@ impl BrowserWindow {
         });
         let w = Rc::downgrade(self);
         self.find_bar.connect_search_mode_enabled_notify(move |bar| {
-            if !bar.is_search_mode() {
-                if let Some(fc) = w.upgrade().and_then(|win| win.current_view()).and_then(|v| v.find_controller()) {
+            if !bar.is_search_mode()
+                && let Some(fc) = w.upgrade().and_then(|win| win.current_view()).and_then(|v| v.find_controller()) {
                     fc.search_finish();
                 }
-            }
         });
     }
 
     fn install_actions(self: &Rc<Self>) {
-        let add = |name: &str, f: Box<dyn Fn(&Rc<BrowserWindow>)>| {
+        type WindowAction = Box<dyn Fn(&Rc<BrowserWindow>)>;
+        let add = |name: &str, f: WindowAction| {
             let action = gio::SimpleAction::new(name, None);
             let w = Rc::downgrade(self);
             action.connect_activate(move |_, _| {
@@ -1039,11 +1094,10 @@ impl BrowserWindow {
             }
         }));
         add("popup-open", Box::new(|w| {
-            if let Some((url, _)) = w.blocked_popup.borrow_mut().take() {
-                if !url.is_empty() {
+            if let Some((url, _)) = w.blocked_popup.borrow_mut().take()
+                && !url.is_empty() {
                     w.new_tab(Some(&url), None, true);
                 }
-            }
             w.popup_bar.set_reveal_child(false);
         }));
         add("popup-allow", Box::new(|w| {
@@ -1526,11 +1580,10 @@ impl BrowserWindow {
         let w = Rc::downgrade(self);
         let t = Rc::downgrade(&tab);
         select.connect_pressed(move |_, _, _, _| {
-            if let (Some(win), Some(tab)) = (w.upgrade(), t.upgrade()) {
-                if let Some(n) = win.notebook.page_num(&tab.page) {
+            if let (Some(win), Some(tab)) = (w.upgrade(), t.upgrade())
+                && let Some(n) = win.notebook.page_num(&tab.page) {
                     win.notebook.set_current_page(Some(n));
                 }
-            }
         });
         tab_header.add_controller(select);
         self.make_draggable(&tab);
@@ -1624,11 +1677,10 @@ impl BrowserWindow {
             let title = title.unwrap_or_else(|| tab.uri.borrow().clone());
             tab.label.set_text(&title);
             tab.label.set_tooltip_text(Some(&title));
-            if win.shared.config.borrow().save_history {
-                if let Some(uri) = v.uri().filter(|u| u.starts_with("https://") || u.starts_with("http://")) {
+            if win.shared.config.borrow().save_history
+                && let Some(uri) = v.uri().filter(|u| u.starts_with("https://") || u.starts_with("http://")) {
                     win.shared.state.set_title(&uri, &title);
                 }
-            }
             *tab.title.borrow_mut() = title;
             win.shared.save_session_soon();
             if win.is_current(&tab) {
@@ -1685,12 +1737,11 @@ impl BrowserWindow {
                     win.shared.plugins.tab_event("tab-updated", &data);
                 }
                 LoadEvent::Finished => {
-                    if win.shared.config.borrow().save_history {
-                        if let Some(uri) = v.uri().filter(|u| u.starts_with("https://") || u.starts_with("http://")) {
+                    if win.shared.config.borrow().save_history
+                        && let Some(uri) = v.uri().filter(|u| u.starts_with("https://") || u.starts_with("http://")) {
                             let title = v.title().map(|t| t.to_string()).unwrap_or_default();
                             win.shared.state.record(&uri, &title);
                         }
-                    }
                 }
                 _ => {}
             }
@@ -1728,14 +1779,13 @@ impl BrowserWindow {
                 decision.ignore();
                 let target = glib::Uri::unescape_string(target, None::<&str>).map(|s| s.to_string());
                 let expected = tab.upgraded_from.borrow().clone();
-                if let (Some(target), Some(expected)) = (target, expected) {
-                    if target == expected {
+                if let (Some(target), Some(expected)) = (target, expected)
+                    && target == expected {
                         if let Some((_, host)) = privacy::scheme_and_host(&target) {
                             win.shared.http_allowed.borrow_mut().insert(host.to_string());
                         }
                         v.load_uri(&target);
                     }
-                }
                 return true;
             }
 
@@ -1940,7 +1990,6 @@ impl BrowserWindow {
         tab.view.borrow_mut().take();
         if self.tabs.borrow().is_empty() {
             self.window.close();
-            return;
         }
     }
 
@@ -2538,22 +2587,30 @@ impl BrowserWindow {
         let w = Rc::downgrade(self);
         dialog.select_folder(Some(&self.window), None::<&gio::Cancellable>, move |res| {
             let (Some(win), Some(src)) = (w.upgrade(), res.ok().and_then(|f| f.path())) else { return };
-            let result = (|| -> Result<String, String> {
+            let result = (|| -> Result<(String, Option<String>), String> {
                 let manifest = std::fs::read_to_string(src.join("plugin.json"))
                     .map_err(|_| "That folder has no plugin.json, so it isn't a Wisp plugin.".to_string())?;
                 let manifest: serde_json::Value =
                     serde_json::from_str(&manifest).map_err(|e| format!("Its plugin.json is not valid: {e}"))?;
                 let id = manifest["id"].as_str().filter(|id| !id.is_empty() && !id.contains(['/', '\\', '.']));
                 let id = id.ok_or("Its plugin.json has no usable \"id\".")?;
-                let dest = plugins::plugin_dirs().remove(0).join(id);
+                let dest = plugins::user_plugin_dir().join(id);
                 if dest.exists() {
                     std::fs::remove_dir_all(&dest).map_err(|e| e.to_string())?;
                 }
                 copy_dir(&src, &dest).map_err(|e| e.to_string())?;
-                Ok(manifest["name"].as_str().unwrap_or(id).to_string())
+                let name = manifest["name"].as_str().unwrap_or(id).to_string();
+                // A built-in plugin keeps its id unless you choose otherwise.
+                let builtin = win.shared.plugins.get(id).filter(|p| !p.dir.starts_with(plugins::user_plugin_dir()));
+                Ok((name, builtin.map(|p| p.manifest.name.clone())))
             })();
+            let restart = "Restart Wisp (Ctrl+Q, then start it again) to load it.";
             let (message, detail) = match result {
-                Ok(name) => (format!("Installed {name}"), "Restart Wisp (Ctrl+Q, then start it again) to load it.".to_string()),
+                Ok((name, None)) => (format!("Installed {name}"), restart.to_string()),
+                Ok((name, Some(builtin))) => (
+                    format!("Installed {name}"),
+                    format!("{restart} It has the same id as the built-in {builtin} plugin, so Wisp will ask whether to use it instead."),
+                ),
                 Err(e) => ("Couldn't install the plugin".to_string(), e),
             };
             gtk::AlertDialog::builder().message(message).detail(detail).build().show(Some(&win.window));

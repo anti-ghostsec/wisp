@@ -53,7 +53,7 @@ fn default_app(file: &gio::File) -> bool {
 fn any_app_for(mime: &str, file: &gio::File) -> bool {
     gio::AppInfo::all_for_type(mime)
         .iter()
-        .any(|app| app.launch(&[file.clone()], None::<&gio::AppLaunchContext>).is_ok())
+        .any(|app| app.launch(std::slice::from_ref(file), None::<&gio::AppLaunchContext>).is_ok())
 }
 
 /// org.freedesktop.FileManager1, which most file managers provide.
@@ -104,11 +104,10 @@ fn from_association_files(path: &Path) -> bool {
     let candidates = [user.join("ferro/associations.conf"), PathBuf::from("/etc/ferro/associations.conf")];
     for conf in candidates {
         let Ok(text) = std::fs::read_to_string(conf) else { continue };
-        if let Some(command) = association(&text, &ext) {
-            if run_command(&command, path) {
+        if let Some(command) = association(&text, &ext)
+            && run_command(&command, path) {
                 return true;
             }
-        }
     }
     false
 }

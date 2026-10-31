@@ -4,13 +4,17 @@
 #
 #   .github/build-linux.sh OUT
 #
+# With WISP_CHECK=1 it first runs clippy (warnings count as errors) and the
+# tests, and builds nothing if either fails: the release workflow does that,
+# so no release goes out that doesn't pass them.
+#
 # Run as root on Debian trixie to get the build tools too (the release
 # workflow runs it in a debian:trixie container, so Wisp runs on that
 # release's WebKitGTK and GTK); run as anyone else, it only builds and packs.
 #
 # OUT gets wisp-linux-x86_64.tar.gz (wisp/wisp, wisp/plugins/, wisp/commit),
 # its .sha256, and wisp-commit: the commit built, for checking without
-# downloading the rest.
+# downloading the rest. The workflow then signs the archive (minisign).
 
 set -eu
 umask 022
@@ -26,12 +30,17 @@ if [ "$(id -u)" = 0 ]; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -q
     apt-get install -y -q --no-install-recommends ca-certificates curl build-essential pkg-config \
-        libwebkitgtk-6.0-dev libgtk-4-dev >/dev/null
+        libwebkitgtk-6.0-dev libgtk-4-dev python3 >/dev/null
 fi
 # Debian's Rust can be older than Wisp's libraries need.
 if ! command -v cargo >/dev/null 2>&1; then
-    curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y -q --profile minimal --default-toolchain stable
+    curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y -q --profile minimal --default-toolchain stable -c clippy
     . "$HOME/.cargo/env"
+fi
+if [ "${WISP_CHECK:-}" = 1 ]; then
+    cargo clippy --release --locked --all-targets --manifest-path "$here/Cargo.toml" -- -D warnings
+    cargo test --release --locked --manifest-path "$here/Cargo.toml"
+    python3 -I "$here/tests/vidgrab_host.py"
 fi
 cargo build --release --locked --manifest-path "$here/Cargo.toml"
 

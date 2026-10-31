@@ -74,10 +74,15 @@ def read_message():
     return json.loads(sys.stdin.buffer.read(length).decode("utf-8"))
 
 
+def is_ytdlp_name(path):
+    return re.fullmatch(r"yt-dlp(_linux(_aarch64|_armv7l)?|_macos)?", os.path.basename(path)) is not None
+
+
 def find_ytdlp(custom=None):
     if custom:
-        custom = os.path.expanduser(custom)
-        if os.path.isfile(custom) and os.access(custom, os.X_OK):
+        custom = os.path.realpath(os.path.expanduser(custom))
+        # Only a yt-dlp program: the setting must not run anything else.
+        if is_ytdlp_name(custom) and os.path.isfile(custom) and os.access(custom, os.X_OK):
             return [custom]
     found = shutil.which("yt-dlp", path=os.pathsep.join(EXTRA_PATHS + [os.environ.get("PATH", "")]))
     if found:
@@ -258,11 +263,83 @@ def page_title_template(title, out_dir):
     return unique.replace("%", "%%") + ".%(ext)s"
 
 
+# The yt-dlp options "Extra yt-dlp arguments" may use, and how many values
+# each takes. Anything else is refused: options such as --exec,
+# --downloader, --postprocessor-args, --config-locations or --plugin-dirs
+# would let a settings field run any program, and -o, -P, --cookies or
+# --batch-file would read or write files outside the download folder.
+EXTRA_ALLOWED = {
+    # Speed and retries
+    "-r": 1, "--limit-rate": 1, "--throttled-rate": 1, "-R": 1, "--retries": 1,
+    "--fragment-retries": 1, "--extractor-retries": 1, "-N": 1, "--concurrent-fragments": 1,
+    "--http-chunk-size": 1, "--sleep-interval": 1, "--min-sleep-interval": 1,
+    "--max-sleep-interval": 1, "--sleep-requests": 1, "--sleep-subtitles": 1,
+    "--socket-timeout": 1, "-4": 0, "--force-ipv4": 0, "-6": 0, "--force-ipv6": 0,
+    "--geo-bypass": 0, "--no-geo-bypass": 0, "--xff": 1,
+    # Formats
+    "-f": 1, "--format": 1, "-S": 1, "--format-sort": 1, "--format-sort-force": 0,
+    "--merge-output-format": 1, "--remux-video": 1, "--recode-video": 1,
+    "--prefer-free-formats": 0, "--check-formats": 0, "--no-check-formats": 0,
+    "-x": 0, "--extract-audio": 0, "--audio-format": 1, "--audio-quality": 1, "-k": 0, "--keep-video": 0,
+    "--video-multistreams": 0, "--audio-multistreams": 0,
+    # Subtitles, metadata, chapters
+    "--write-subs": 0, "--write-auto-subs": 0, "--sub-langs": 1, "--sub-format": 1, "--embed-subs": 0,
+    "--convert-subs": 1, "--embed-thumbnail": 0, "--embed-metadata": 0, "--embed-chapters": 0,
+    "--no-embed-chapters": 0, "--embed-info-json": 0, "--sponsorblock-remove": 1, "--sponsorblock-mark": 1,
+    # Files
+    "--no-mtime": 0, "--no-part": 0, "--restrict-filenames": 0, "--windows-filenames": 0,
+    "--trim-filenames": 1, "-w": 0, "--no-overwrites": 0, "--force-overwrites": 0,
+    "--min-filesize": 1, "--max-filesize": 1,
+    # Live streams and playlists
+    "--live-from-start": 0, "--no-live-from-start": 0, "--wait-for-video": 1, "--hls-use-mpegts": 0,
+    "--playlist-items": 1, "-I": 1, "--playlist-reverse": 0, "--playlist-random": 0,
+    "-i": 0, "--ignore-errors": 0, "--abort-on-error": 0,
+}
+
+
+def extra_args(text):
+    """The user's extra yt-dlp arguments, if every one is allowed."""
+    import shlex
+    try:
+        words = shlex.split(text)
+    except ValueError as e:
+        raise RuntimeError(f"Extra yt-dlp arguments can't be read: {e}") from None
+    out, i = [], 0
+    while i < len(words):
+        word = words[i]
+        # --option=value counts as the option and its value.
+        name, eq, value = word.partition("=") if word.startswith("--") else (word, "", "")
+        takes = EXTRA_ALLOWED.get(name)
+        if takes is None or (eq and takes != 1):
+            raise RuntimeError(f"Extra yt-dlp argument {name!r} isn't allowed. "
+                               "VidGrab's settings allow download, format, subtitle and file-name options only.")
+        if eq:
+            out += [name, value]
+        elif takes:
+            if i + 1 >= len(words):
+                raise RuntimeError(f"Extra yt-dlp argument {name} needs a value.")
+            out += [name, words[i + 1]]
+            i += 1
+        else:
+            out.append(name)
+        i += 1
+    return out
+
+
+def safe_template(template):
+    """An output template that stays inside the download folder."""
+    parts = re.split(r"[/\\]", template)
+    if template.startswith(("/", "~")) or ".." in parts:
+        raise RuntimeError("The file name template must stay inside the download folder "
+                           "(no leading / or ~, no ..).")
+    return template
+
+
 def build_download_cmd(ytdlp, msg):
     opts = msg.get("options", {})
     out_dir = os.path.expanduser(opts.get("outputDir") or default_download_dir())
     os.makedirs(out_dir, exist_ok=True)
-    template = opts.get("filenameTemplate") or DEFAULT_TEMPLATE
+    template = safe_template(opts.get("filenameTemplate") or DEFAULT_TEMPLATE)
     if template == OLD_DEFAULT_TEMPLATE:
         template = DEFAULT_TEMPLATE
     if msg.get("pageTitle"):
@@ -312,10 +389,7 @@ def build_download_cmd(ytdlp, msg):
     if msg.get("userAgent"):
         # Matching the browser keeps sites from serving a different page.
         cmd += ["--user-agent", msg["userAgent"]]
-    extra = (opts.get("extraArgs") or "").strip()
-    if extra:
-        import shlex
-        cmd += shlex.split(extra)
+    cmd += extra_args(opts.get("extraArgs") or "")
     cmd += ["--", msg["url"]]
     return cmd, out_dir
 
@@ -340,6 +414,8 @@ def save_cookies(text):
 
 def handle_download(msg):
     job_id = msg["id"]
+    # Only the host names a cookies file (and deletes it afterwards).
+    msg.setdefault("options", {}).pop("cookiesFile", None)
     if msg.get("cookies"):
         msg.setdefault("options", {})["cookiesFile"] = save_cookies(msg["cookies"])
     ytdlp = find_ytdlp(msg.get("options", {}).get("ytdlpPath"))

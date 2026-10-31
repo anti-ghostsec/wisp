@@ -149,11 +149,10 @@ pub fn rewrite_url(uri: &str, cfg: &Config, http_allowed: impl Fn(&str) -> bool)
     }
     if cfg.https_only {
         let current = out.as_deref().unwrap_or(uri);
-        if let Some(("http", host)) = scheme_and_host(current) {
-            if !is_local_host(host) && !http_allowed(host) {
+        if let Some(("http", host)) = scheme_and_host(current)
+            && !is_local_host(host) && !http_allowed(host) {
                 out = Some(format!("https://{}", &current["http://".len()..]));
             }
-        }
     }
     out
 }

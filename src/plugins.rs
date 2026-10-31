@@ -24,7 +24,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 use webkit6::glib::translate::IntoGlib;
@@ -242,6 +244,11 @@ pub trait PluginUi {
     fn download(&self, url: &str);
     /// Open a file or folder with the system's app for it.
     fn open_path(&self, path: &Path) -> bool;
+    /// Whether the user let this native helper command run (see `native_key`).
+    fn native_allowed(&self, key: &str) -> bool;
+    fn allow_native(&self, key: &str);
+    /// Ask the user; resolves to the button chosen, None if dismissed.
+    fn ask(&self, message: String, detail: String, buttons: &[&str]) -> Pin<Box<dyn Future<Output = Option<i32>>>>;
 }
 
 pub struct PluginHost {
@@ -262,24 +269,44 @@ pub struct PluginHost {
     backgrounds: RefCell<HashMap<String, WebView>>,
     /// Running native helpers, by plugin id.
     natives: RefCell<HashMap<String, Rc<NativePort>>>,
+    /// Plugins whose helper the user is being asked about, or turned down
+    /// this run.
+    native_asking: RefCell<std::collections::HashSet<String>>,
+    native_denied: RefCell<std::collections::HashSet<String>>,
+    /// Plugins in your own plugins folder with the id of a built-in one,
+    /// left out: (id, your copy's folder).
+    pub shadowed: Vec<(String, PathBuf)>,
     /// Toolbar badge text, by plugin id.
     badges: RefCell<HashMap<String, String>>,
 }
 
+/// Your own plugins folder.
+pub fn user_plugin_dir() -> PathBuf {
+    config::data_dir().join("plugins")
+}
+
 /// Directories searched for plugins, in priority order (first id wins).
+/// Built-in plugins come first: a plugin of your own with the same id (one
+/// called "passwords", say) doesn't replace one silently, only when you've
+/// chosen to use it instead (`plugin_overrides`).
 pub fn plugin_dirs() -> Vec<PathBuf> {
-    let mut dirs = vec![config::data_dir().join("plugins")];
+    let mut dirs = Vec::new();
     if let Ok(extra) = std::env::var("WISP_PLUGIN_PATH") {
         dirs.extend(std::env::split_paths(&extra));
     }
     dirs.push(PathBuf::from("/usr/share/wisp/plugins"));
     // Bundled plugins when running from the source tree.
     dirs.push(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/plugins")));
+    dirs.push(user_plugin_dir());
     dirs
 }
 
-fn discover(cfg: &Config) -> Vec<Rc<Plugin>> {
+/// The plugins found, and your own ones left out for having a built-in
+/// plugin's id.
+fn discover(cfg: &Config) -> (Vec<Rc<Plugin>>, Vec<(String, PathBuf)>) {
     let mut found: Vec<Rc<Plugin>> = Vec::new();
+    let mut shadowed = Vec::new();
+    let user_dir = user_plugin_dir();
     for dir in plugin_dirs() {
         let Ok(entries) = fs::read_dir(&dir) else { continue };
         let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
@@ -294,14 +321,28 @@ fn discover(cfg: &Config) -> Vec<Rc<Plugin>> {
                     continue;
                 }
             };
-            if found.iter().any(|p| p.manifest.id == manifest.id) {
+            let enabled = cfg.plugins.get(&manifest.id).copied().unwrap_or(manifest.enabled_by_default);
+            if let Some(i) = found.iter().position(|p| p.manifest.id == manifest.id) {
+                if dir == user_dir && found[i].dir != path {
+                    if cfg.plugin_overrides.contains(&manifest.id) {
+                        found[i] = Rc::new(Plugin { manifest, dir: path, enabled: Cell::new(enabled) });
+                    } else {
+                        eprintln!("wisp: {} has the id of a built-in plugin; using the built-in one", path.display());
+                        shadowed.push((manifest.id, path));
+                    }
+                }
                 continue;
             }
-            let enabled = cfg.plugins.get(&manifest.id).copied().unwrap_or(manifest.enabled_by_default);
             found.push(Rc::new(Plugin { manifest, dir: path, enabled: Cell::new(enabled) }));
         }
     }
-    found
+    (found, shadowed)
+}
+
+/// How an allowed helper is remembered in `allowed_native_helpers`: the
+/// plugin and the exact command, so a changed command asks again.
+pub fn native_key(id: &str, command: &str) -> String {
+    format!("{id}: {command}")
 }
 
 /// Runs first in each plugin's isolated world and defines the `wisp` API object.
@@ -386,8 +427,9 @@ impl PluginHost {
         let _ = fs::create_dir_all(&store_dir);
         let http = soup::Session::new();
         http.set_timeout(60);
+        let (plugins, shadowed) = discover(cfg);
         let host = Rc::new(PluginHost {
-            plugins: discover(cfg),
+            plugins,
             ucm: ucm.clone(),
             filter_store: UserContentFilterStore::new(&store_dir.to_string_lossy()),
             filters: RefCell::new(HashMap::new()),
@@ -400,6 +442,9 @@ impl PluginHost {
             network: session.clone(),
             backgrounds: RefCell::new(HashMap::new()),
             natives: RefCell::new(HashMap::new()),
+            native_asking: RefCell::default(),
+            native_denied: RefCell::default(),
+            shadowed,
             badges: RefCell::new(HashMap::new()),
         });
         for p in &host.plugins {
@@ -589,7 +634,7 @@ impl PluginHost {
         }
     }
 
-    fn native_port(self: &Rc<Self>, p: &Rc<Plugin>) -> Result<Rc<NativePort>, String> {
+    async fn native_port(self: &Rc<Self>, p: &Rc<Plugin>) -> Result<Rc<NativePort>, String> {
         if let Some(port) = self.natives.borrow().get(&p.manifest.id) {
             return Ok(port.clone());
         }
@@ -604,6 +649,11 @@ impl PluginHost {
             .iter()
             .map(|a| p.file(a).filter(|f| f.is_file()).map(|f| f.into_os_string()).unwrap_or_else(|| a.into()))
             .collect();
+        self.ask_native(p, &argv).await?;
+        // Another call may have started it while the question was up.
+        if let Some(port) = self.natives.borrow().get(&p.manifest.id) {
+            return Ok(port.clone());
+        }
         let (weak, plugin) = (Rc::downgrade(self), p.clone());
         let on_message = move |msg: Json| {
             if let Some(host) = weak.upgrade() {
@@ -624,6 +674,44 @@ impl PluginHost {
         let port = NativePort::spawn(&argv, &p.dir, started, on_message, on_exit)?;
         self.natives.borrow_mut().insert(p.manifest.id.clone(), port.clone());
         Ok(port)
+    }
+
+    /// A helper is a program running as you, outside the browser's
+    /// sandbox: it starts only once you've allowed that exact command for
+    /// that plugin.
+    async fn ask_native(&self, p: &Plugin, argv: &[std::ffi::OsString]) -> Result<(), String> {
+        let id = &p.manifest.id;
+        let command = argv.iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" ");
+        let key = native_key(id, &command);
+        let ui = self.ui.borrow().clone().ok_or("the browser isn't ready yet")?;
+        if ui.native_allowed(&key) {
+            return Ok(());
+        }
+        let refused = || format!("{} isn't allowed to start its helper program", p.manifest.name);
+        if self.native_denied.borrow().contains(id) {
+            return Err(refused());
+        }
+        if !self.native_asking.borrow_mut().insert(id.clone()) {
+            return Err(format!("waiting for you to allow {}'s helper program", p.manifest.name));
+        }
+        let choice = ui
+            .ask(
+                format!("Let {} run a program?", p.manifest.name),
+                format!(
+                    "The {} plugin wants to start its helper:\n\n{command}\n\nIt runs as you, outside the browser's sandbox, and can do anything you can. Allow it only if you trust this plugin.",
+                    p.manifest.name
+                ),
+                &["Don't Allow", "Allow"],
+            )
+            .await;
+        self.native_asking.borrow_mut().remove(id);
+        if choice == Some(1) {
+            ui.allow_native(&key);
+            Ok(())
+        } else {
+            self.native_denied.borrow_mut().insert(id.clone());
+            Err(refused())
+        }
     }
 
     // ---- content blocking ----
@@ -894,7 +982,7 @@ impl PluginHost {
             }
             ("native", "post") => {
                 need("native")?;
-                self.native_port(p)?.post(&args["message"])?;
+                self.native_port(p).await?.post(&args["message"])?;
                 Ok(Json::Null)
             }
             ("native", "close") => {
@@ -906,11 +994,10 @@ impl PluginHost {
             ("action", "badge") => {
                 let text: String = args["text"].as_str().unwrap_or("").chars().take(4).collect();
                 let old = self.badges.borrow_mut().insert(p.manifest.id.clone(), text.clone());
-                if old.as_deref() != Some(&text) {
-                    if let Some(ui) = self.ui.borrow().clone() {
+                if old.as_deref() != Some(&text)
+                    && let Some(ui) = self.ui.borrow().clone() {
                         ui.plugins_changed();
                     }
-                }
                 Ok(Json::Null)
             }
             ("downloads", "start") => {

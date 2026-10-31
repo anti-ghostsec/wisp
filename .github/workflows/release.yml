@@ -1,5 +1,7 @@
-# Every push to main publishes a ready-built Wisp for Linux, as the newest
-# release. FerroOS's updater installs it from there.
+# Every push to main that passes clippy and the tests publishes a
+# ready-built Wisp for Linux, signed with minisign, as the newest release.
+# FerroOS's updater installs it from there, and only if the signature checks
+# out against Wisp's public key (minisign.pub, built into the updater).
 name: Release
 
 on:
@@ -20,10 +22,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build on Debian trixie
+      # Clippy and the tests run first: if either fails, nothing is built.
+      - name: Check and build on Debian trixie
         run: >
-          docker run --rm -v "$PWD:/src" -w /src -e WISP_COMMIT="$GITHUB_SHA"
+          docker run --rm -v "$PWD:/src" -w /src -e WISP_COMMIT="$GITHUB_SHA" -e WISP_CHECK=1
           debian:trixie .github/build-linux.sh dist
+
+      # The trusted comment names the commit and its time, so the updater
+      # can tell this build is the one it was told about, and never goes
+      # back to an older one.
+      - name: Sign
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          [ -n "$MINISIGN_SECRET_KEY" ] || { echo "MINISIGN_SECRET_KEY isn't set: no release without a signature" >&2; exit 1; }
+          sudo apt-get install -y -q minisign >/dev/null
+          # The container made dist/ as root.
+          sudo chown -R "$(id -u):$(id -g)" dist
+          key=$(mktemp)
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$MINISIGN_SECRET_KEY" >"$key"
+          when=$(git log -1 --format=%ct "$GITHUB_SHA")
+          minisign -S -s "$key" -m dist/wisp-linux-x86_64.tar.gz -t "wisp $GITHUB_SHA $when"
+          # Signed with the key the updater trusts, not some other one.
+          minisign -V -p minisign.pub -m dist/wisp-linux-x86_64.tar.gz
 
       - name: Publish
         env:
@@ -32,5 +54,6 @@ jobs:
           short=$(echo "$GITHUB_SHA" | cut -c1-7)
           gh release create "build-$short" --target "$GITHUB_SHA" --latest \
             --title "Wisp $short" \
-            --notes "Wisp for Linux (x86-64), built from $GITHUB_SHA on Debian trixie." \
-            dist/wisp-linux-x86_64.tar.gz dist/wisp-linux-x86_64.tar.gz.sha256 dist/wisp-commit
+            --notes "Wisp for Linux (x86-64), built from $GITHUB_SHA on Debian trixie. Signed with minisign: minisign -Vm wisp-linux-x86_64.tar.gz -P $(tail -1 minisign.pub)" \
+            dist/wisp-linux-x86_64.tar.gz dist/wisp-linux-x86_64.tar.gz.sha256 \
+            dist/wisp-linux-x86_64.tar.gz.minisig dist/wisp-commit

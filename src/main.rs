@@ -84,6 +84,9 @@ fn main() -> glib::ExitCode {
         let reused = if !starting && !uris.is_empty() { shared.open_in_tabs(&uris) } else { None };
         let window = restored.or(reused).unwrap_or_else(|| BrowserWindow::new(&shared, &uris));
         window.warn_if_outdated();
+        if starting {
+            shared.ask_about_shadowed_plugins();
+        }
         if let Ok(path) = std::env::var("WISP_SCREENSHOT") {
             let secs = std::env::var("WISP_SCREENSHOT_DELAY").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
             window.screenshot_and_quit(path, std::time::Duration::from_secs(secs));

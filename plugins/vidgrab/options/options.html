@@ -61,9 +61,11 @@
 
     <label for="ytdlpPath">yt-dlp path</label>
     <input type="text" id="ytdlpPath" placeholder="(auto-detect)">
+    <div class="hint">A program named <code>yt-dlp</code> (or <code>yt-dlp_linux</code>); anything else is ignored.</div>
 
     <label for="extraArgs">Extra yt-dlp arguments</label>
     <input type="text" id="extraArgs" placeholder="e.g. --limit-rate 5M">
+    <div class="hint">Download, format, subtitle and file-name options only, such as <code>--limit-rate</code>, <code>-N</code>, <code>-f</code>, <code>--sub-langs</code> or <code>--no-mtime</code>. Options that run programs or touch other files (<code>--exec</code>, <code>-o</code>, <code>--config-locations</code>, …) are refused.</div>
   </section>
 
   <div class="actions">

@@ -71,6 +71,10 @@ pub struct Config {
     pub toolbar_hidden: Vec<String>,
     /// Plugins that start out of the toolbar but were put in it.
     pub toolbar_shown: Vec<String>,
+    /// Plugins of your own used instead of the built-in plugin with the same id.
+    pub plugin_overrides: Vec<String>,
+    /// Plugin helper programs you allowed to run, as "plugin-id: command".
+    pub allowed_native_helpers: Vec<String>,
 }
 
 impl Default for Config {
@@ -104,6 +108,8 @@ impl Default for Config {
             plugin_order: Vec::new(),
             toolbar_hidden: Vec::new(),
             toolbar_shown: Vec::new(),
+            plugin_overrides: Vec::new(),
+            allowed_native_helpers: Vec::new(),
         }
     }
 }

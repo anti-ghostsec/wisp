@@ -89,7 +89,8 @@ fn convert_rule(line: &str) -> Option<(Json, bool)> {
             "document" | "doc" if !exception => types.push("document"),
             "subdocument" | "frame" => subframe_only = true,
             _ => {
-                if let Some(list) = opt.strip_prefix("domain=") {
+                {
+                    let list = opt.strip_prefix("domain=")?;
                     for d in list.split('|') {
                         let (neg, d) = match d.strip_prefix('~') {
                             Some(rest) => (true, rest),
@@ -101,8 +102,6 @@ fn convert_rule(line: &str) -> Option<(Json, bool)> {
                         let d = format!("*{}", d.to_ascii_lowercase());
                         if neg { unless_domains.push(d) } else { if_domains.push(d) }
                     }
-                } else {
-                    return None; // option WebKit can't express
                 }
             }
         }
@@ -172,7 +171,7 @@ fn pattern_to_regex(pattern: &str) -> Option<(String, bool)> {
         rest = r;
         host_anchored = true;
         // `||host^` -> the host must end right there.
-        let host_end = rest.find(|c: char| matches!(c, '^' | '/' | '*' | ':' | '?')).unwrap_or(rest.len());
+        let host_end = rest.find(['^', '/', '*', ':', '?']).unwrap_or(rest.len());
         let (host, tail) = rest.split_at(host_end);
         if host.is_empty() {
             return None;

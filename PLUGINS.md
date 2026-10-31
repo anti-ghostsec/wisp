@@ -7,6 +7,12 @@ and toggle it from the menu (☰). Wisp also loads plugins from `$WISP_PLUGIN_PA
 (colon-separated), `/usr/share/wisp/plugins` and the `plugins/` folder of the
 source tree.
 
+Built-in plugins (those folders) come first. A plugin of your own with a
+built-in plugin's id (`passwords`, say) would get everything that plugin has,
+its saved data included, so it is left out: Wisp says so when it starts and
+offers **Use Mine Instead** (remembered in `plugin_overrides` in
+`config.json`; it takes effect from the next start).
+
 ## Manifest
 
 ```json
@@ -61,7 +67,7 @@ source tree.
 | `toolbar` | `false` keeps the actions out of the toolbar at first: they sit next to the plugin in the ☰ menu until the user ticks **Toolbar**. Shortcuts work either way. Default `true`. |
 | `context_menu` | Right-click menu entries. `contexts` says where they show: `editable` (text fields), `link`, `media` (video and audio), `selection` or `page` (everywhere, the default). Choosing one sends a `context-menu` event `{ id, tabId, pageUrl, pageTitle, linkUrl, mediaUrl }` to the plugin's background script if it has one, otherwise to its isolated script on that page. |
 | `background` | Scripts that run in a hidden page (`wisp-plugin://<id>/_background.html`) for as long as the plugin is enabled, like an extension's background page. They have the `wisp` API. |
-| `native` | A helper program the background script talks to (needs `native`): the command and its arguments. Arguments naming files in the plugin folder become full paths; the command is looked up on `PATH`. It speaks the WebExtensions native-messaging format (JSON preceded by a 32-bit little-endian length), so Firefox helpers work unchanged. It starts with the first message and stops when the plugin is disabled. |
+| `native` | A helper program the background script talks to (needs `native`): the command and its arguments. Arguments naming files in the plugin folder become full paths; the command is looked up on `PATH`. It speaks the WebExtensions native-messaging format (JSON preceded by a 32-bit little-endian length), so Firefox helpers work unchanged. It starts with the first message, once you've allowed it: a helper runs as you, outside the browser's sandbox, so Wisp shows the exact command and asks first. **Allow** is remembered for that plugin and command (`allowed_native_helpers` in `config.json`; a changed command asks again); **Don't Allow** holds until Wisp restarts, and `wisp.native.post` fails meanwhile. It stops when the plugin is disabled. |
 | `color_scheme` | `"dark"`: while the plugin is enabled, pages are told the user prefers dark (`prefers-color-scheme: dark`) and Wisp's own UI turns dark. `dark-mode` uses it so sites show their own dark theme. |
 | `sync_prefixes` | Title prefixes of synced entries this plugin may read and write. |
 

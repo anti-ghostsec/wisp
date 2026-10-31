@@ -455,11 +455,10 @@ impl Sync {
 
     async fn key(&self) -> Result<[u8; 32], String> {
         let account = self.account().ok_or("no sync account")?;
-        if let Some((a, k)) = self.key.borrow().as_ref() {
-            if *a == account {
+        if let Some((a, k)) = self.key.borrow().as_ref()
+            && *a == account {
                 return Ok(*k);
             }
-        }
         let key = derive_key(&account).await;
         *self.key.borrow_mut() = Some((account, key));
         Ok(key)

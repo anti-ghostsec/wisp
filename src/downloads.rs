@@ -301,13 +301,10 @@ impl Downloads {
             row.add_css_class("wisp-dl-row");
             let path = item.path.borrow().clone();
             let main = gtk::Button::builder().child(&content).hexpand(true).css_classes(["flat"]).build();
-            match (&path, state) {
-                (Some(p), State::Done) => {
-                    let (open, p) = (open.clone(), p.clone());
-                    main.set_tooltip_text(Some("Open file"));
-                    main.connect_clicked(move |_| open(&p));
-                }
-                _ => {}
+            if let (Some(p), State::Done) = (&path, state) {
+                let (open, p) = (open.clone(), p.clone());
+                main.set_tooltip_text(Some("Open file"));
+                main.connect_clicked(move |_| open(&p));
             }
             row.append(&main);
             let side = match (state, path) {
