@@ -550,6 +550,24 @@ impl Shared {
         }
     }
 
+    /// Open links handed over by another launch (an app opening a file or
+    /// link) as tabs of the window in use, the first one shown.
+    pub fn open_in_tabs(&self, uris: &[String]) -> Option<Rc<BrowserWindow>> {
+        let active = self.app.active_window();
+        let win = self
+            .windows
+            .borrow()
+            .iter()
+            .find(|w| active.as_ref() == Some(w.window.upcast_ref::<gtk::Window>()))
+            .cloned()
+            .or_else(|| self.last_window())?;
+        for (i, uri) in uris.iter().enumerate() {
+            win.new_tab(Some(uri), None, i == 0);
+        }
+        win.window.present();
+        Some(win)
+    }
+
     fn last_window(&self) -> Option<Rc<BrowserWindow>> {
         self.windows.borrow().last().cloned()
     }

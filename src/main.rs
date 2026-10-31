@@ -46,7 +46,8 @@ fn main() -> glib::ExitCode {
     configure_rendering(&cfg);
 
     // One process serves every window: launching wisp again opens a window
-    // in the running instance instead of starting a second browser.
+    // (or, given links, tabs) in the running instance instead of starting a
+    // second browser.
     let app = gtk::Application::builder()
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
@@ -79,7 +80,9 @@ fn main() -> glib::ExitCode {
         let shared = shared.borrow_mut().get_or_insert_with(|| Shared::new(app, cfg.take().unwrap_or_default())).clone();
         // The first window of a run brings back the last session's tabs, if asked to.
         let restored = if starting && uris.is_empty() { shared.restore_session() } else { None };
-        let window = restored.unwrap_or_else(|| BrowserWindow::new(&shared, &uris));
+        // Links from a later launch open as tabs in the window already open.
+        let reused = if !starting && !uris.is_empty() { shared.open_in_tabs(&uris) } else { None };
+        let window = restored.or(reused).unwrap_or_else(|| BrowserWindow::new(&shared, &uris));
         window.warn_if_outdated();
         if let Ok(path) = std::env::var("WISP_SCREENSHOT") {
             let secs = std::env::var("WISP_SCREENSHOT_DELAY").ok().and_then(|s| s.parse().ok()).unwrap_or(8);

@@ -41,6 +41,8 @@ it from there.
   page handing you back to its app, open in the app your system has for
   them, after asking. **Always open** skips the question for that kind of
   link (stored in `allowed_app_links`).
+- **Files and links from other apps** open as new tabs in the Wisp window
+  you're using, not as another browser window.
 - **Permissions**: geolocation, camera, microphone and notification requests
   are denied.
 - **Fingerprinting**: the `fingerprint-shield` plugin reports uniform device values.
