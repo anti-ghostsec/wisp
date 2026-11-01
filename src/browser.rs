@@ -1521,9 +1521,7 @@ impl BrowserWindow {
             let (w, l, pid) = (Rc::downgrade(self), list.clone(), id.clone());
             switch.connect_state_set(move |_, on| {
                 if let Some(win) = w.upgrade() {
-                    let mut cfg = win.shared.config.borrow_mut();
-                    win.shared.plugins.set_enabled(&pid, on, &mut cfg);
-                    drop(cfg);
+                    win.shared.plugins.set_enabled(&pid, on, &win.shared.config);
                     if let Some(v) = win.current_view() {
                         v.reload();
                     }

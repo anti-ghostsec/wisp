@@ -500,11 +500,15 @@ impl PluginHost {
         }
     }
 
-    pub fn set_enabled(self: &Rc<Self>, id: &str, enabled: bool, cfg: &mut Config) {
+    /// The settings are released before the UI is rebuilt, which reads them.
+    pub fn set_enabled(self: &Rc<Self>, id: &str, enabled: bool, cfg: &RefCell<Config>) {
         if let Some(p) = self.get(id) {
             p.enabled.set(enabled);
-            cfg.plugins.insert(id.to_string(), enabled);
-            cfg.save();
+            {
+                let mut cfg = cfg.borrow_mut();
+                cfg.plugins.insert(id.to_string(), enabled);
+                cfg.save();
+            }
             self.apply();
             self.sync_backgrounds();
             if let Some(ui) = self.ui.borrow().clone() {
