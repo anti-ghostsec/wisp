@@ -5,7 +5,7 @@ const DEFAULT_OPTIONS = {
   defaultPreset: "best",
   allowPlaylist: false,
   embedMetadata: true,
-  subtitles: false,
+  subtitles: true,
   subLangs: "en.*",
   sponsorblock: false,
   useCookies: "auto", // "off" | "auto" (retry when a site asks for a login) | "always"

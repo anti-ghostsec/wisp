@@ -376,7 +376,10 @@ def build_download_cmd(ytdlp, msg):
     if opts.get("embedMetadata") and ffmpeg:
         cmd += ["--embed-metadata", "--embed-thumbnail"]
     if opts.get("subtitles"):
-        cmd += ["--write-subs", "--sub-langs", opts.get("subLangs") or "en.*"] + (["--embed-subs"] if ffmpeg else [])
+        # A stream's subtitle tracks are often named ("English") rather
+        # than coded ("en"), so take all of them there.
+        langs = "all" if msg.get("pageTitle") else (opts.get("subLangs") or "en.*")
+        cmd += ["--write-subs", "--sub-langs", langs] + (["--embed-subs"] if ffmpeg else [])
     if opts.get("sponsorblock"):
         cmd += ["--sponsorblock-remove", "sponsor,selfpromo,interaction"]
     if opts.get("useCookies") == "always":
@@ -428,12 +431,13 @@ def handle_download(msg):
         send({"type": "job", "id": job_id, "state": "error", "error": str(e)})
         return
     send({"type": "job", "id": job_id, "state": "running", "dir": out_dir})
-    threading.Thread(target=run_job_then_forget_cookies, args=(job_id, cmd, msg.get("options", {})), daemon=True).start()
+    subs = [s for s in msg.get("subtitles") or [] if str(s.get("url", "")).startswith(("https://", "http://"))][:20]
+    threading.Thread(target=run_job_then_forget_cookies, args=(job_id, cmd, msg.get("options", {}), subs, msg), daemon=True).start()
 
 
-def run_job_then_forget_cookies(job_id, cmd, opts):
+def run_job_then_forget_cookies(job_id, cmd, opts, subs=(), msg=None):
     try:
-        run_job(job_id, cmd, opts)
+        run_job(job_id, cmd, opts, subs, msg or {})
     finally:
         if opts.get("cookiesFile"):
             try:
@@ -451,7 +455,51 @@ def with_template(cmd, template):
     return cmd[:i + 1] + [template] + cmd[i + 2:]
 
 
-def run_job(job_id, cmd, opts):
+SUB_LIMIT = 4 * 1024 * 1024
+
+
+def save_subtitles(video, subs, msg):
+    """Save a stream's subtitle files next to the video, as "<video>.<lang>.vtt",
+    which VLC, mpv and most players load with it. Returns the files saved."""
+    base = os.path.splitext(video)[0]
+    headers = {"User-Agent": msg.get("userAgent") or "Mozilla/5.0"}
+    if msg.get("referer"):
+        headers["Referer"] = msg["referer"]
+    saved, used = [], set()
+    for n, s in enumerate(subs, 1):
+        try:
+            req = urllib.request.Request(s["url"], headers=headers)
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = r.read(SUB_LIMIT + 1)
+        except Exception:  # noqa: BLE001
+            continue
+        if len(data) > SUB_LIMIT or not data.strip():
+            continue
+        text = data.lstrip(b"\xef\xbb\xbf").lstrip()
+        ext = "vtt" if text.startswith(b"WEBVTT") else "srt" if re.match(rb"\d+\s*\r?\n\d\d:", text) else None
+        # One piece of an HLS subtitle playlist, not a whole file.
+        if not ext or b"X-TIMESTAMP-MAP" in text[:300]:
+            continue
+        lang = re.sub(r"[^a-zA-Z0-9-]", "", str(s.get("lang") or ""))[:12] or f"sub{n}"
+        name = lang
+        i = 2
+        while name in used:
+            name, i = f"{lang}{i}", i + 1
+        used.add(name)
+        path = f"{base}.{name}.{ext}"
+        try:
+            with open(path, "wb") as f:
+                f.write(data)
+            saved.append(path)
+        except OSError:
+            pass
+    return saved
+
+
+VIDEO_FILE = re.compile(r"\.(mp4|mkv|webm|mov|m4v)$", re.I)
+
+
+def run_job(job_id, cmd, opts, subs=(), msg=None):
     code, last_err, files = run_ytdlp(job_id, cmd)
     if is_failure(code) and NEEDS_LOGIN.search(last_err) and opts.get("useCookies", "auto") == "auto" \
             and "--cookies-from-browser" not in cmd and "--cookies" not in cmd:
@@ -476,6 +524,10 @@ def run_job(job_id, cmd, opts):
               "stage": "File name too long, retrying with a shorter name…"})
         code, last_err, files = run_ytdlp(job_id, with_template(cmd, SHORT_TEMPLATE))
     if code == 0:
+        video = next((f for f in reversed(files) if VIDEO_FILE.search(f)), None)
+        if subs and video:
+            send({"type": "job", "id": job_id, "state": "running", "stage": "Saving subtitles…"})
+            files = files + save_subtitles(video, subs, msg or {})
         send({"type": "job", "id": job_id, "state": "done", "percent": 100, "files": files})
     elif code < 0 or code == 130:
         send({"type": "job", "id": job_id, "state": "cancelled"})

@@ -1673,7 +1673,7 @@ impl BrowserWindow {
     }
 
     fn connect_view(self: &Rc<Self>, tab: &Rc<Tab>, view: &WebView) {
-        // Video and audio the page loads, for plugins that asked ("media").
+        // Video, audio and subtitles the page loads, for plugins that asked ("media").
         let (w, t) = (Rc::downgrade(self), Rc::downgrade(tab));
         view.connect_resource_load_started(move |v, resource, _| {
             let Some(win) = w.upgrade() else { return };
@@ -2928,11 +2928,12 @@ fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()>
 /// Video, audio or a streaming playlist, by type or file extension.
 fn is_media(url: &str, mime: &str) -> bool {
     let mime = mime.to_ascii_lowercase();
-    if mime.starts_with("video/") || mime.starts_with("audio/") || mime.contains("mpegurl") || mime.contains("dash+xml") {
+    if mime.starts_with("video/") || mime.starts_with("audio/") || mime.contains("mpegurl") || mime.contains("dash+xml")
+        || mime.starts_with("text/vtt") || mime.contains("subrip") {
         return true;
     }
     let path = url.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase();
-    [".m3u8", ".mpd", ".mp4", ".webm", ".mkv", ".mov", ".m4v", ".mp3", ".m4a", ".ogg", ".opus", ".flac"]
+    [".m3u8", ".mpd", ".mp4", ".webm", ".mkv", ".mov", ".m4v", ".mp3", ".m4a", ".ogg", ".opus", ".flac", ".vtt", ".srt"]
         .iter()
         .any(|ext| path.ends_with(ext))
 }

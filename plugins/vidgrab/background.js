@@ -7,6 +7,7 @@ let connected = false;
 let hostStatus = null; // last "status" reply, or {error} if the host can't start
 const jobs = new Map(); // id -> job object
 const sniffed = new Map(); // tabId -> Map(url -> media item)
+const sniffedSubs = new Map(); // tabId -> Map(url -> { url, lang })
 
 // ---------- native host ----------
 
@@ -115,8 +116,15 @@ async function startDownload({ url, preset, referer, title, nameFromPage }) {
   if (opts.useCookies !== "off") {
     try { cookies = await wisp.cookies.netscape(url); } catch {}
   }
+  // A stream's subtitles are separate files the player fetched: the
+  // helper saves them next to the video.
+  let subtitles;
+  if (nameFromPage && opts.subtitles) {
+    const tab = [...sniffed].find(([, media]) => media.has(url))?.[0];
+    subtitles = [...(sniffedSubs.get(tab)?.values() || [])];
+  }
   const ok = await postToHost({ action: "download", id, url, preset: job.preset, referer, pageTitle, userAgent: navigator.userAgent, options: opts,
-    cookies,
+    cookies, subtitles,
   });
   if (!ok) {
     job.state = "error";
@@ -151,6 +159,30 @@ const MEDIA_TYPES = /^(video\/|audio\/|application\/(vnd\.apple\.mpegurl|x-mpegu
 const MANIFEST_EXT = /\.(m3u8|mpd)(\?|$)/i;
 const FILE_EXT = /\.(mp4|webm|mkv|mov|m4v|mp3|m4a|ogg|opus|flac)(\?|$)/i;
 const SEGMENT_EXT = /\.(ts|m4s|aac|vtt)(\?|$)|\/(seg|segment|chunk|frag)[-_]?\d+/i;
+// Subtitle files a player fetches for a stream (not the pieces of an HLS
+// subtitle playlist, which yt-dlp gets from the playlist itself).
+const SUB_EXT = /\.(vtt|srt)(\?|$)/i;
+const SUB_TYPES = /^(text\/vtt|application\/x-subrip|text\/srt)/i;
+const SUB_PIECE = /\/(seg|segment|chunk|frag)[-_]?\d+|filesequence\d+/i;
+// A language code in the file name or path ("…/en.vtt", "movie_eng.srt",
+// "?lang=es"), so players pick the file up as that language.
+const LANGS = new Set(("en eng english es spa spanish fr fre fra french de ger deu german it ita italian pt por portuguese "
+  + "ja jpn japanese ko kor korean zh chi zho chinese ru rus russian ar ara arabic hi hin hindi nl dut nld tr tur pl pol sv swe "
+  + "id ind vi vie th tha uk ukr cs cze ces el gre ell he heb ro rum ron hu hun da dan fi fin no nor nb").split(" "));
+function subLanguage(url) {
+  let path = url;
+  try { const u = new URL(url); path = u.pathname + " " + [...u.searchParams.values()].join(" "); } catch {}
+  const words = path.toLowerCase().split(/[\/_.\- =]+/).filter((w) => LANGS.has(w.replace(/-[a-z]{2}$/, "")));
+  return words.pop() || "";
+}
+function addSubtitle(d) {
+  if (SUB_PIECE.test(d.url) || (d.size > 0 && d.size > 4 * 1024 * 1024)) return;
+  let subs = sniffedSubs.get(d.tabId);
+  if (!subs) sniffedSubs.set(d.tabId, (subs = new Map()));
+  const key = d.url.split("#")[0];
+  if (!subs.has(key)) subs.set(key, { url: key, lang: subLanguage(key) });
+}
+
 // Sites where yt-dlp handles the page URL itself; their raw streams are noise.
 const IGNORE_HOSTS = /(googlevideo\.com|youtube\.com|ytimg\.com|ggpht\.com)$/i;
 
@@ -158,8 +190,10 @@ const IGNORE_HOSTS = /(googlevideo\.com|youtube\.com|ytimg\.com|ggpht\.com)$/i;
 wisp.on("media", (d) => {
   let host;
   try { host = new URL(d.url).hostname; } catch { return; }
-  if (IGNORE_HOSTS.test(host) || SEGMENT_EXT.test(d.url)) return;
+  if (IGNORE_HOSTS.test(host)) return;
   const ctype = (d.mime || "").split(";")[0].trim();
+  if (SUB_EXT.test(d.url) || SUB_TYPES.test(ctype)) return addSubtitle(d);
+  if (SEGMENT_EXT.test(d.url)) return;
   const isManifest = MANIFEST_EXT.test(d.url) || /mpegurl|dash\+xml/i.test(ctype);
   const isFile = FILE_EXT.test(d.url) || (MEDIA_TYPES.test(ctype) && !/mp2t|iso.segment/i.test(ctype));
   if (!isManifest && !isFile) return;
@@ -185,9 +219,13 @@ wisp.on("media", (d) => {
 
 wisp.on("tab-updated", ({ tabId }) => {
   sniffed.delete(tabId);
+  sniffedSubs.delete(tabId);
   updateBadge();
 });
-wisp.on("tab-closed", ({ tabId }) => sniffed.delete(tabId));
+wisp.on("tab-closed", ({ tabId }) => {
+  sniffed.delete(tabId);
+  sniffedSubs.delete(tabId);
+});
 
 // ---------- context menus ----------
 
