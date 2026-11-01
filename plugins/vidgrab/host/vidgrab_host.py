@@ -518,6 +518,56 @@ def vtt_to_srt(path):
     return path
 
 
+# ISO 639-2 codes players show as the track's language.
+LANG3 = {"en": "eng", "english": "eng", "es": "spa", "spanish": "spa", "fr": "fra", "fre": "fra", "french": "fra",
+         "de": "deu", "ger": "deu", "german": "deu", "it": "ita", "italian": "ita", "pt": "por", "portuguese": "por",
+         "ja": "jpn", "japanese": "jpn", "ko": "kor", "korean": "kor", "zh": "zho", "chi": "zho", "chinese": "zho",
+         "ru": "rus", "russian": "rus", "ar": "ara", "arabic": "ara", "hi": "hin", "hindi": "hin", "nl": "nld",
+         "dut": "nld", "tr": "tur", "pl": "pol", "sv": "swe", "id": "ind", "vi": "vie", "th": "tha", "uk": "ukr",
+         "cs": "ces", "cze": "ces", "el": "ell", "gre": "ell", "he": "heb", "ro": "ron", "rum": "ron", "hu": "hun",
+         "da": "dan", "fi": "fin", "no": "nor", "nb": "nob"}
+
+
+def embed_subtitles(video, subs):
+    """Put subtitle files into the video as selectable tracks. Returns True
+    when it worked (the separate files are then removed)."""
+    ffmpeg = shutil.which("ffmpeg", path=search_path())
+    if not ffmpeg or not subs:
+        return False
+    root, ext = os.path.splitext(video)
+    tmp = f"{root}.subs-tmp{ext}"
+    cmd = [ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-i", video]
+    for f in subs:
+        cmd += ["-i", f]
+    cmd += ["-map", "0"] + [x for i in range(len(subs)) for x in ("-map", str(i + 1))]
+    # MP4 only takes subtitles as mov_text; MKV and WebM keep their own kind.
+    codec = "mov_text" if ext.lower() in (".mp4", ".m4v", ".mov") else "srt" if ext.lower() == ".mkv" else "webvtt"
+    cmd += ["-c", "copy", "-c:s", codec]
+    for i, f in enumerate(subs):
+        lang = f.rsplit(".", 2)[-2].lower() if f.count(".") >= 2 else ""
+        lang = LANG3.get(re.sub(r"-.*", "", lang), lang if len(lang) == 3 else "")
+        if lang:
+            cmd += [f"-metadata:s:s:{i}", f"language={lang}"]
+    cmd.append(tmp)
+    try:
+        ok = subprocess.run(cmd, capture_output=True, timeout=600).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        ok = False
+    if not ok or not os.path.getsize(tmp):
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+    os.replace(tmp, video)
+    for f in subs:
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+    return True
+
+
 VIDEO_FILE = re.compile(r"\.(mp4|mkv|webm|mov|m4v)$", re.I)
 
 
@@ -549,7 +599,9 @@ def run_job(job_id, cmd, opts, subs=(), msg=None):
         video = next((f for f in reversed(files) if VIDEO_FILE.search(f)), None)
         if subs and video:
             send({"type": "job", "id": job_id, "state": "running", "stage": "Saving subtitles…"})
-            files = files + save_subtitles(video, subs, msg or {})
+            saved = save_subtitles(video, subs, msg or {})
+            if not embed_subtitles(video, saved):
+                files = files + saved
         send({"type": "job", "id": job_id, "state": "done", "percent": 100, "files": files})
     elif code < 0 or code == 130:
         send({"type": "job", "id": job_id, "state": "cancelled"})
