@@ -571,7 +571,21 @@ def embed_subtitles(video, subs):
 VIDEO_FILE = re.compile(r"\.(mp4|mkv|webm|mov|m4v)$", re.I)
 
 
+def downloaded_video(files, cmd, since):
+    """The video file a job made: the one yt-dlp reported if it's there,
+    else the newest video in the download folder written since the start."""
+    for f in reversed(files):
+        if VIDEO_FILE.search(f) and os.path.isfile(f):
+            return f
+    folder = cmd[cmd.index("-P") + 1] if "-P" in cmd else None
+    if not folder or not os.path.isdir(folder):
+        return None
+    found = [e for e in os.scandir(folder) if e.is_file() and VIDEO_FILE.search(e.name) and e.stat().st_mtime >= since]
+    return max(found, key=lambda e: e.stat().st_mtime).path if found else None
+
+
 def run_job(job_id, cmd, opts, subs=(), msg=None):
+    started = time.time() - 2
     code, last_err, files = run_ytdlp(job_id, cmd)
     if is_failure(code) and NEEDS_LOGIN.search(last_err) and opts.get("useCookies", "auto") == "auto" \
             and "--cookies-from-browser" not in cmd and "--cookies" not in cmd:
@@ -596,7 +610,7 @@ def run_job(job_id, cmd, opts, subs=(), msg=None):
               "stage": "File name too long, retrying with a shorter name…"})
         code, last_err, files = run_ytdlp(job_id, with_template(cmd, SHORT_TEMPLATE))
     if code == 0:
-        video = next((f for f in reversed(files) if VIDEO_FILE.search(f)), None)
+        video = downloaded_video(files, cmd, started) if subs else None
         if subs and video:
             send({"type": "job", "id": job_id, "state": "running", "stage": "Saving subtitles…"})
             saved = save_subtitles(video, subs, msg or {})
