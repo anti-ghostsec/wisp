@@ -490,10 +490,32 @@ def save_subtitles(video, subs, msg):
         try:
             with open(path, "wb") as f:
                 f.write(data)
-            saved.append(path)
         except OSError:
-            pass
+            continue
+        saved.append(vtt_to_srt(path) if ext == "vtt" else path)
     return saved
+
+
+def vtt_to_srt(path):
+    """Most desktop players read SRT; WebVTT much less often. Returns the
+    SRT file, or the VTT file when ffmpeg isn't there or can't convert it."""
+    ffmpeg = shutil.which("ffmpeg", path=search_path())
+    if not ffmpeg:
+        return path
+    srt = path[:-4] + ".srt"
+    try:
+        ok = subprocess.run([ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-i", path, srt],
+                            capture_output=True, timeout=60).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        ok = False
+    if ok and os.path.getsize(srt) > 0:
+        os.remove(path)
+        return srt
+    try:
+        os.remove(srt)
+    except OSError:
+        pass
+    return path
 
 
 VIDEO_FILE = re.compile(r"\.(mp4|mkv|webm|mov|m4v)$", re.I)
