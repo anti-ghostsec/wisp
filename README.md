@@ -57,6 +57,13 @@ it from there.
   second one, so a page that's busy loading doesn't hold up their buttons.
 - **Tab suspension**: background tabs unload after `suspend_tabs_after_minutes`
   of inactivity. They keep their history and reload when you switch back.
+- **Background tabs wait**: a link opened in the background (middle-click,
+  Ctrl+click, Open in New Tab) loads only when you first switch to it, so
+  opening several videos at once doesn't load and buffer them all together.
+- **Playing tabs keep playing**: WebKit pauses a page's video and music
+  when its tab is hidden; a tab that's playing sound when you leave it is
+  kept going, unseen, and goes back to normal when you return or a little
+  after it stops.
 - **Memory limit**: each web process has a soft limit (`memory_limit_mb`).
   Above it, WebKit drops caches and runs garbage collection.
 - **Small caches**: the cache model is small and there is no back/forward page

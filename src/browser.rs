@@ -698,12 +698,20 @@ pub struct Tab {
     last_active: Cell<Instant>,
     /// Original http:// URL when we upgraded the current load to https://.
     upgraded_from: RefCell<Option<String>>,
+    /// Playing in the background: its view sits on the window's stage,
+    /// unseen, instead of in its page (see `park`).
+    parked: Cell<bool>,
+    /// The tab this one was opened from, as a pop-up or in the background.
+    opened_from: Cell<Option<u64>>,
 }
 
 pub struct BrowserWindow {
     shared: Rc<Shared>,
     window: gtk::ApplicationWindow,
     notebook: gtk::Notebook,
+    /// Holds the notebook, and above it, unseen, the views of background
+    /// tabs that are playing (`park`).
+    stage: gtk::Overlay,
     /// Our own tab strip (the notebook's is hidden), so "+" can sit right
     /// after the last tab.
     strip: gtk::Box,
@@ -902,13 +910,15 @@ impl BrowserWindow {
         vbox.append(&popup_bar);
         vbox.append(&find_bar);
         vbox.append(&tab_bar);
-        vbox.append(&notebook);
+        let stage = gtk::Overlay::builder().child(&notebook).vexpand(true).build();
+        vbox.append(&stage);
         window.set_child(Some(&vbox));
 
         let win = Rc::new(BrowserWindow {
             shared: shared.clone(),
             window,
             notebook,
+            stage,
             strip,
             strip_scroll,
 
@@ -1010,9 +1020,18 @@ impl BrowserWindow {
         self.entry.add_controller(click);
 
         let w = Rc::downgrade(self);
-        self.notebook.connect_switch_page(move |_, page, _| {
+        self.notebook.connect_switch_page(move |nb, page, _| {
             let Some(win) = w.upgrade() else { return };
+            // Still the tab being left (this runs before the switch): if it's
+            // playing, it carries on playing.
+            if let Some(old) = nb.current_page().and_then(|n| nb.nth_page(Some(n))).and_then(|p| win.tab_for_page(&p))
+                && old.page != *page
+                && old.view.borrow().as_ref().is_some_and(|v| v.is_playing_audio())
+            {
+                win.park(&old);
+            }
             if let Some(tab) = win.tab_for_page(page) {
+                win.unpark(&tab);
                 win.highlight_tab(&tab);
                 tab.last_active.set(Instant::now());
                 // Restores the tab if it was suspended.
@@ -1582,8 +1601,15 @@ impl BrowserWindow {
 
     // ---- tabs ----
 
-    pub fn new_tab(self: &Rc<Self>, uri: Option<&str>, related: Option<&WebView>, focus: bool) -> WebView {
-        self.open_tab(uri, related, focus, None).expect("a tab that isn't lazy has a view")
+    /// A new tab; its view, unless it's a link opened in the background,
+    /// which loads only once it's first shown.
+    pub fn new_tab(self: &Rc<Self>, uri: Option<&str>, related: Option<&WebView>, focus: bool) -> Option<WebView> {
+        self.open_tab(uri, related, focus, None)
+    }
+
+    /// A tab for a page's own pop-up, which WebKit fills: it has a view.
+    fn new_popup_tab(self: &Rc<Self>, related: &WebView) -> WebView {
+        self.open_tab(None, Some(related), true, None).expect("a pop-up's tab has a view")
     }
 
     /// A restored tab at the end of the strip that loads when first shown.
@@ -1592,12 +1618,28 @@ impl BrowserWindow {
     }
 
     fn open_tab(self: &Rc<Self>, uri: Option<&str>, related: Option<&WebView>, focus: bool, lazy: Option<&str>) -> Option<WebView> {
+        // Pop-ups and background tabs go next to the current tab; new and
+        // restored tabs at the end.
+        let next_to_current = lazy.is_none() && (related.is_some() || !focus);
+        // A link opened in the background waits until you first look at it:
+        // five videos opened at once would otherwise all load, play and
+        // buffer together, and take the whole computer with them.
+        let rewritten = uri.filter(|u| !u.is_empty()).map(|u| self.shared.rewrite(u).unwrap_or_else(|| u.to_string()));
+        let lazy = match (&rewritten, lazy) {
+            (Some(_), None) if related.is_none() && !focus => Some(""),
+            _ => lazy,
+        };
+        let uri = if lazy.is_some() { rewritten.as_deref().or(uri) } else { uri };
         let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        // Every tab as wide as the others, whatever its title: a tab whose
+        // page loads and gets a longer title doesn't push the rest along
+        // the strip, away from where you were looking.
         let label = gtk::Label::builder()
             .label("New Tab")
             .ellipsize(gtk::pango::EllipsizeMode::End)
-            .width_chars(12)
-            .max_width_chars(22)
+            .width_chars(18)
+            .max_width_chars(18)
+            .xalign(0.0)
             .build();
         let tab_header = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         tab_header.add_css_class("wisp-tab");
@@ -1612,6 +1654,8 @@ impl BrowserWindow {
             state: RefCell::new(None),
             last_active: Cell::new(Instant::now()),
             upgraded_from: RefCell::new(None),
+            parked: Cell::new(false),
+            opened_from: Cell::new(None),
         });
 
         tab_header.set_widget_name(&format!("tab:{}", tab.id));
@@ -1652,7 +1696,7 @@ impl BrowserWindow {
             None => Some(self.create_view(&tab, related)),
             Some(title) => {
                 *tab.uri.borrow_mut() = uri.unwrap_or_default().to_string();
-                let shown = if title.is_empty() { uri.unwrap_or_default() } else { title };
+                let shown = if title.is_empty() { short_address(uri.unwrap_or_default()) } else { title };
                 *tab.title.borrow_mut() = shown.to_string();
                 tab.label.set_text(shown);
                 tab.label.set_tooltip_text(Some(shown));
@@ -1660,10 +1704,24 @@ impl BrowserWindow {
             }
         };
         self.tabs.borrow_mut().push(tab.clone());
-        // Pop-ups and background tabs go next to the current tab; new and
-        // restored tabs at the end.
-        let next_to_current = lazy.is_none() && (related.is_some() || !focus);
-        let idx = if next_to_current { self.current_index().map(|i| i + 1) } else { None };
+        // After the current tab and the tabs already opened from it, so
+        // links opened one after another line up in the order you opened them.
+        let idx = if next_to_current {
+            let current = self.current_tab();
+            tab.opened_from.set(current.as_ref().map(|c| c.id));
+            self.current_index().map(|i| {
+                let mut at = i + 1;
+                while let Some(t) = self.notebook.nth_page(Some(at)).and_then(|p| self.tab_for_page(&p))
+                    && t.opened_from.get().is_some()
+                    && t.opened_from.get() == tab.opened_from.get()
+                {
+                    at += 1;
+                }
+                at
+            })
+        } else {
+            None
+        };
         let n = self.notebook.insert_page(&page, None::<&gtk::Widget>, idx);
         self.strip.append(&tab.header);
         self.order_strip();
@@ -1694,6 +1752,7 @@ impl BrowserWindow {
         view.set_vexpand(true);
         shared.views.borrow_mut().push(view.downgrade());
         self.connect_view(tab, &view);
+        self.watch_parked(tab, &view);
         tab.page.append(&view);
         *tab.view.borrow_mut() = Some(view.clone());
         view
@@ -1885,7 +1944,7 @@ impl BrowserWindow {
             let same_site = !target.is_empty() && site_of(&target) == opener_site;
             let allowed = win.shared.popup_allowed.borrow().contains(&opener_site);
             if is_link || same_site || allowed {
-                let new_view = win.new_tab(None, Some(v), true);
+                let new_view = win.new_popup_tab(v);
                 return Some(new_view.upcast());
             }
             win.show_blocked_popup(&target, &opener_site);
@@ -2007,8 +2066,58 @@ impl BrowserWindow {
         view
     }
 
+    /// Keep a tab that's playing going while another is shown. WebKit pauses
+    /// a page's video and music as soon as its view is hidden, which is
+    /// what a tab you leave is; so its view moves onto the window's stage,
+    /// still there as far as WebKit can tell but fully see-through and out
+    /// of the mouse's way. It goes back into its tab when you return, or a
+    /// little after it stops playing.
+    fn park(self: &Rc<Self>, tab: &Rc<Tab>) {
+        let Some(view) = tab.view.borrow().clone() else { return };
+        if tab.parked.replace(true) {
+            return;
+        }
+        tab.page.remove(&view);
+        view.set_opacity(0.0);
+        view.set_can_target(false);
+        view.set_can_focus(false);
+        self.stage.add_overlay(&view);
+    }
+
+    /// Back into its own page (hidden again unless it's the current tab).
+    fn unpark(&self, tab: &Tab) {
+        if !tab.parked.replace(false) {
+            return;
+        }
+        let Some(view) = tab.view.borrow().clone() else { return };
+        self.stage.remove_overlay(&view);
+        view.set_opacity(1.0);
+        view.set_can_target(true);
+        view.set_can_focus(true);
+        tab.page.append(&view);
+    }
+
+    /// A parked tab that has stopped playing goes back into its page, after
+    /// a while: between songs or videos there's a moment of silence.
+    fn watch_parked(self: &Rc<Self>, tab: &Rc<Tab>, view: &WebView) {
+        let (w, t) = (Rc::downgrade(self), Rc::downgrade(tab));
+        view.connect_is_playing_audio_notify(move |view| {
+            if view.is_playing_audio() || !t.upgrade().is_some_and(|t| t.parked.get()) {
+                return;
+            }
+            let (w, t, view) = (w.clone(), t.clone(), view.downgrade());
+            glib::timeout_add_seconds_local_once(30, move || {
+                let (Some(win), Some(tab), Some(view)) = (w.upgrade(), t.upgrade(), view.upgrade()) else { return };
+                if !view.is_playing_audio() {
+                    win.unpark(&tab);
+                }
+            });
+        });
+    }
+
     /// Free a background tab's web content, keeping its URL and history.
     fn suspend(&self, tab: &Tab) {
+        self.unpark(tab);
         let Some(view) = tab.view.borrow_mut().take() else { return };
         *tab.state.borrow_mut() = view.session_state();
         tab.page.remove(&view);
@@ -2040,6 +2149,11 @@ impl BrowserWindow {
     }
 
     fn close_tab(self: &Rc<Self>, tab: &Rc<Tab>) {
+        if tab.parked.replace(false)
+            && let Some(view) = tab.view.borrow().as_ref()
+        {
+            self.stage.remove_overlay(view);
+        }
         if let Some(n) = self.notebook.page_num(&tab.page) {
             self.notebook.remove_page(Some(n));
         }
@@ -3064,8 +3178,22 @@ document.getElementById('f').onsubmit = e => {{
     )
 }
 
+/// An address as a tab shows it before its page has a title: without
+/// "https://" and "www.", so tabs opened from one site tell apart.
+fn short_address(uri: &str) -> &str {
+    let rest = uri.split_once("://").map_or(uri, |(_, r)| r);
+    rest.strip_prefix("www.").unwrap_or(rest)
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn short_addresses() {
+        assert_eq!(short_address("https://www.youtube.com/watch?v=x"), "youtube.com/watch?v=x");
+        assert_eq!(short_address("http://127.0.0.1:8765/a.html"), "127.0.0.1:8765/a.html");
+        assert_eq!(short_address("wisp:start"), "wisp:start");
+    }
     use super::*;
 
     #[test]
