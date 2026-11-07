@@ -78,7 +78,11 @@ it from there.
   GPU that drives your display (handy on laptops and hybrid desktops) and
   passes frames through shared memory, because DMA-BUF hand-off hangs on
   some drivers. `hardware_acceleration` also moves page drawing and the UI
-  to the GPU. Environment variables you set yourself (`GSK_RENDERER`,
+  to the GPU. Video frames reach the page on the GPU too (`gpu_video`, on
+  by default; ☰ → *Draw video on the graphics card*). Some drivers (seen
+  with Intel's iris) show some sites' videos black that way though the
+  frames are fine: untick it and they arrive as plain pictures, for a
+  little more CPU. Environment variables you set yourself (`GSK_RENDERER`,
   `WEBKIT_*`) take precedence.
 - **Native blocklists**: content blocking is compiled bytecode, not JavaScript.
 

@@ -158,6 +158,10 @@ fn configure_rendering(cfg: &config::Config) {
         let ranks: Vec<String> = HARDWARE_DECODERS.iter().map(|d| format!("{d}:NONE")).collect();
         vars.push(("GST_PLUGIN_FEATURE_RANK", ranks.join(",")));
     }
+    if !cfg.gpu_video {
+        // Video frames reach the page as plain pictures, not GPU textures.
+        vars.push(("WEBKIT_GST_DISABLE_GL_SINK", "1".into()));
+    }
     if cfg.gpu_compositing || cfg.hardware_acceleration {
         // Handing frames to the UI as DMA-BUFs hangs the UI thread on some
         // drivers; shared memory works everywhere.

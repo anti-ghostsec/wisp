@@ -43,6 +43,11 @@ pub struct Config {
     pub gpu_compositing: bool,
     /// Also draw page content and the browser UI on the GPU.
     pub hardware_acceleration: bool,
+    /// Hand video frames to the page on the GPU (as textures). Off: as
+    /// plain pictures, a little more work for the CPU. Some GPU drivers
+    /// (seen with Intel's iris) show some sites' videos black that way,
+    /// though the frames are fine. Takes effect when Wisp next starts.
+    pub gpu_video: bool,
     /// Tabs share one web process where WebKit allows it.
     pub shared_web_process: bool,
     /// Unload background tabs after this many idle minutes (0 = never).
@@ -95,6 +100,7 @@ impl Default for Config {
             user_agent: None,
             gpu_compositing: true,
             hardware_acceleration: false,
+            gpu_video: true,
             shared_web_process: true,
             suspend_tabs_after_minutes: 15,
             memory_limit_mb: 768,

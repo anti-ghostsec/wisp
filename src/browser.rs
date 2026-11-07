@@ -1424,6 +1424,13 @@ impl BrowserWindow {
             "IndexedDB, which some sites and web apps need. In a private session it's kept in memory and deleted when Wisp quits. Reload a page to apply.",
         ));
         vbox.append(&databases);
+        let gpu_video = toggle("Draw video on the graphics card", cfg.gpu_video, |shared, on| {
+            shared.config.borrow_mut().gpu_video = on;
+        });
+        gpu_video.set_tooltip_text(Some(
+            "Untick if videos play black while their sound and controls work: frames then reach the page as plain pictures (a little more CPU). Takes effect when Wisp is next started.",
+        ));
+        vbox.append(&gpu_video);
         vbox.append(&gtk::Button::builder().label("History (Ctrl+H)").action_name("win.history").build());
         // Set, change or remove the password that locks saved passwords,
         // bookmarks, history and tabs; or unlock them if that was put off.
