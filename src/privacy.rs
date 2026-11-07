@@ -56,8 +56,13 @@ pub fn web_context(cfg: &Config) -> WebContext {
         builder = builder.memory_pressure_settings(&s);
     }
     let ctx = builder.build();
+    // DocumentViewer, the smallest, keeps no pictures in memory at all:
+    // pages that redraw their lists (YouTube's thumbnails and avatars)
+    // fetched every picture again each time, and they flashed or stayed
+    // blank. DocumentBrowser still keeps them, in less memory than
+    // WebBrowser.
     ctx.set_cache_model(if cfg.low_memory_cache {
-        CacheModel::DocumentViewer
+        CacheModel::DocumentBrowser
     } else {
         CacheModel::WebBrowser
     });

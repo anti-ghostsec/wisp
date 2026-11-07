@@ -66,8 +66,10 @@ it from there.
   after it stops.
 - **Memory limit**: each web process has a soft limit (`memory_limit_mb`).
   Above it, WebKit drops caches and runs garbage collection.
-- **Small caches**: the cache model is small and there is no back/forward page
-  cache (`low_memory_cache`).
+- **Small caches**: the cache model is small (WebKit's document browser: it
+  still keeps pictures, so pages that redraw their lists don't fetch them
+  again and flash) and there is no back/forward page cache
+  (`low_memory_cache`).
 - **Rendering**: page content is drawn by the CPU and the browser UI with
   cairo, which keeps text crisp and keeps GPU drivers out of the UI process.
   Finished frames are composited on the GPU (`gpu_compositing`, on by
