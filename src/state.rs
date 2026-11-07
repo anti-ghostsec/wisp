@@ -1,15 +1,12 @@
 //! Browsing history and open tabs, both optional and off by default.
 //!
-//! Stored encrypted (AES-256-GCM) in the data folder. The key is kept apart
-//! from the data, in the config folder, readable only by you: copying or
-//! backing up the data folder alone reveals nothing. Anyone who can read
-//! both folders as you can decrypt them, so full-disk encryption is what
-//! protects them from someone with the drive.
+//! Stored encrypted (AES-256-GCM) in the data folder, with the vault's key:
+//! with a Wisp password set, they can't be read without it. While the vault
+//! is locked nothing is recorded, read or written.
 
 use crate::config;
 use crate::sync::{decrypt, encrypt};
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as B64;
+use crate::vault;
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
 use std::fs;
@@ -34,7 +31,6 @@ pub struct Visit {
 pub type SavedTab = (String, String);
 
 pub struct Store {
-    key: RefCell<Option<[u8; 32]>>,
     history: RefCell<Option<Vec<Visit>>>,
     save_queued: Cell<bool>,
 }
@@ -47,49 +43,18 @@ fn session_path() -> PathBuf {
     config::data_dir().join("session.enc")
 }
 
-fn key_path() -> PathBuf {
-    config::config_dir().join("state.key")
-}
-
-fn write_private(path: &Path, text: &str) {
-    let _ = path.parent().map(fs::create_dir_all);
-    let tmp = path.with_extension("tmp");
-    if fs::write(&tmp, text).is_ok() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
-        }
-        let _ = fs::rename(&tmp, path);
-    }
-}
-
 fn now() -> i64 {
     glib::real_time() / 1_000_000
 }
 
 impl Store {
     pub fn new() -> Rc<Store> {
-        Rc::new(Store { key: RefCell::new(None), history: RefCell::new(None), save_queued: Cell::new(false) })
+        Rc::new(Store { history: RefCell::new(None), save_queued: Cell::new(false) })
     }
 
-    /// The key, made on first use.
+    /// The vault's key; None while it's locked.
     fn key(&self) -> Option<[u8; 32]> {
-        if let Some(k) = *self.key.borrow() {
-            return Some(k);
-        }
-        let stored = fs::read_to_string(key_path()).ok().and_then(|t| B64.decode(t.trim()).ok()).and_then(|b| <[u8; 32]>::try_from(b).ok());
-        let key = match stored {
-            Some(k) => k,
-            None => {
-                let mut k = [0u8; 32];
-                getrandom::fill(&mut k).ok()?;
-                write_private(&key_path(), &B64.encode(k));
-                k
-            }
-        };
-        *self.key.borrow_mut() = Some(key);
-        Some(key)
+        vault::get().data_key()
     }
 
     fn read<T: for<'de> Deserialize<'de>>(&self, path: &Path) -> Option<T> {
@@ -101,13 +66,18 @@ impl Store {
     fn write<T: Serialize>(&self, path: &Path, value: &T) {
         let (Some(key), Ok(text)) = (self.key(), serde_json::to_string(value)) else { return };
         if let Ok(blob) = encrypt(&key, &text) {
-            write_private(path, &blob);
+            let _ = vault::write_private(path, &blob);
         }
     }
 
     // ---- history ----
 
     fn with_history<R>(&self, f: impl FnOnce(&mut Vec<Visit>) -> R) -> R {
+        // Locked: what's on disk can't be read, so nothing is kept (and an
+        // empty list never gets saved over it).
+        if self.key().is_none() {
+            return f(&mut Vec::new());
+        }
         let mut h = self.history.borrow_mut();
         let list = h.get_or_insert_with(|| self.read(&history_path()).unwrap_or_default());
         f(list)

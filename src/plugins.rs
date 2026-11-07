@@ -18,6 +18,7 @@ use crate::adblock;
 use crate::config::{self, Config};
 use crate::native::NativePort;
 use crate::sync::Sync;
+use crate::vault;
 use serde::Deserialize;
 use serde_json::{Map, Value as Json, json};
 use std::cell::{Cell, RefCell};
@@ -42,6 +43,8 @@ use webkit6::{gio, glib, soup};
 pub const PAGE_SCHEME: &str = "wisp-plugin";
 /// The (empty) page background scripts run in: wisp-plugin://<id>/_background.html
 pub const BACKGROUND_PAGE: &str = "_background.html";
+/// Wisp's own fixes for how some pages behave in WebKit (page_fixes.js).
+const PAGE_FIXES: &str = include_str!("page_fixes.js");
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Manifest {
@@ -489,11 +492,20 @@ impl PluginHost {
         });
     }
 
-    /// (Re)install scripts, styles and filters of all enabled plugins.
+    /// (Re)install Wisp's own page fixes, and the scripts, styles and filters
+    /// of all enabled plugins.
     pub fn apply(self: &Rc<Self>) {
         self.ucm.remove_all_scripts();
         self.ucm.remove_all_style_sheets();
         self.ucm.remove_all_filters();
+        self.ucm.add_script(&UserScript::for_world(
+            PAGE_FIXES,
+            UserContentInjectedFrames::AllFrames,
+            UserScriptInjectionTime::Start,
+            "wisp-page-fixes",
+            &[],
+            &[],
+        ));
         let enabled: Vec<_> = self.enabled().cloned().collect();
         for p in &enabled {
             self.install(p);
@@ -1114,7 +1126,7 @@ impl PluginHost {
     }
 
     fn storage_path(p: &Plugin) -> PathBuf {
-        config::data_dir().join("plugin-data").join(format!("{}.json", p.key()))
+        vault::plugin_data_dir().join(format!("{}.json", p.key()))
     }
 
     fn with_map<R>(
@@ -1124,6 +1136,11 @@ impl PluginHost {
         persist: bool,
         f: impl FnOnce(&Map<String, Json>) -> R,
     ) -> R {
+        // Locked: kept data can't be read; nothing is cached, so it's read
+        // once the vault is open.
+        if persist && vault::get().data_key().is_none() {
+            return f(&Map::new());
+        }
         let mut all = map.borrow_mut();
         let m = all.entry(p.manifest.id.clone()).or_insert_with(|| {
             if persist { load_map(&Self::storage_path(p)) } else { Map::new() }
@@ -1138,6 +1155,10 @@ impl PluginHost {
         persist: bool,
         f: impl FnOnce(&mut Map<String, Json>),
     ) -> Result<(), String> {
+        let key = vault::get().data_key();
+        if persist && key.is_none() {
+            return Err(vault::LOCKED.into());
+        }
         let mut all = map.borrow_mut();
         let m = all.entry(p.manifest.id.clone()).or_insert_with(|| {
             if persist { load_map(&Self::storage_path(p)) } else { Map::new() }
@@ -1149,10 +1170,11 @@ impl PluginHost {
         if text.len() > 1 << 20 {
             return Err("plugin storage quota (1 MB) exceeded".into());
         }
-        if persist {
-            let path = Self::storage_path(p);
-            let _ = fs::create_dir_all(path.parent().unwrap());
-            fs::write(&path, text).map_err(|e| e.to_string())?;
+        if let (true, Some(key)) = (persist, key) {
+            // Encrypted with the vault's key: which sites you never save
+            // passwords for, which login you used last, ...
+            let blob = crate::sync::encrypt(&key, &text)?;
+            vault::write_private(&Self::storage_path(p), &blob).map_err(|e| e.to_string())?;
         }
         *m = updated;
         Ok(())
@@ -1183,11 +1205,19 @@ fn netscape_cookies(cookies: &mut [soup::Cookie]) -> String {
     out
 }
 
+/// A plugin's kept data, decrypted (or as it is, from before it was
+/// encrypted; the next write encrypts it).
 fn load_map(path: &Path) -> Map<String, Json> {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let Some(text) = fs::read_to_string(path).ok() else { return Map::new() };
+    let text = if vault::is_plain_json(&text) {
+        text
+    } else {
+        match vault::get().data_key().and_then(|k| crate::sync::decrypt(&k, &text).ok()) {
+            Some(t) => t,
+            None => return Map::new(),
+        }
+    };
+    serde_json::from_str(&text).unwrap_or_default()
 }
 
 fn sanitize(s: &str) -> String {

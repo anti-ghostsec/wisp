@@ -9,6 +9,7 @@
 //!   blob = base64(iv[16] || AES-256-GCM(key, iv, lzutf8(json)))
 
 use crate::config;
+use crate::vault;
 use aes_gcm::aead::consts::U16;
 use aes_gcm::aead::{Aead, KeyInit, Nonce};
 use aes_gcm::aes::Aes256;
@@ -44,29 +45,6 @@ pub struct Account {
     pub password: String,
 }
 
-impl Account {
-    fn path() -> PathBuf {
-        config::config_dir().join("sync.json")
-    }
-
-    pub fn load() -> Option<Account> {
-        serde_json::from_str(&fs::read_to_string(Self::path()).ok()?).ok()
-    }
-
-    fn save(&self) -> Result<(), String> {
-        let _ = fs::create_dir_all(config::config_dir());
-        let path = Self::path();
-        let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        fs::write(&path, text).map_err(|e| e.to_string())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-        }
-        Ok(())
-    }
-}
-
 /// What this device knows: the tree as last seen on the service, plus writes
 /// that haven't been uploaded yet. Plugins see `local` straight away, so reads
 /// and writes never wait for the network.
@@ -84,7 +62,6 @@ struct State {
 
 pub struct Sync {
     http: soup::Session,
-    account: RefCell<Option<Account>>,
     key: RefCell<Option<(Account, [u8; 32])>>,
     state: RefCell<Option<State>>,
     busy: Cell<bool>,
@@ -100,7 +77,6 @@ impl Sync {
         http.set_user_agent("wisp");
         Rc::new(Sync {
             http,
-            account: RefCell::new(Account::load()),
             key: RefCell::new(None),
             state: RefCell::new(None),
             busy: Cell::new(false),
@@ -110,8 +86,9 @@ impl Sync {
         })
     }
 
+    /// The sync login, kept in the vault; None while it's locked.
     pub fn account(&self) -> Option<Account> {
-        self.account.borrow().clone()
+        vault::get().account()
     }
 
     /// Called whenever the entries may have changed (a write here, or new
@@ -151,6 +128,9 @@ impl Sync {
 
     /// Create a fresh sync id with a random password on `service`.
     pub async fn create_account(&self, service: &str) -> Result<Account, String> {
+        if !vault::get().is_open() {
+            return Err(vault::LOCKED.into());
+        }
         let service = service.trim_end_matches('/').to_string();
         let info = self.request("GET", &format!("{service}/info"), None).await?;
         if info["status"].as_i64() == Some(3) {
@@ -167,6 +147,9 @@ impl Sync {
 
     /// Switch to an existing account after checking the password decrypts it.
     pub async fn use_account(&self, account: Account) -> Result<(), String> {
+        if !vault::get().is_open() {
+            return Err(vault::LOCKED.into());
+        }
         let account = Account { service: account.service.trim_end_matches('/').to_string(), ..account };
         let key = derive_key(&account).await;
         let data = self
@@ -182,8 +165,7 @@ impl Sync {
     }
 
     fn set_account(&self, account: Account) -> Result<(), String> {
-        account.save()?;
-        *self.account.borrow_mut() = Some(account);
+        vault::get().set_account(account)?;
         *self.state.borrow_mut() = None;
         *self.key.borrow_mut() = None;
         let _ = fs::remove_file(cache_path());
@@ -252,6 +234,10 @@ impl Sync {
     }
 
     async fn prepare_write(self: &Rc<Self>) -> Result<(), String> {
+        // Locked, there's no account to see: making one would replace yours.
+        if !vault::get().is_open() {
+            return Err(vault::LOCKED.into());
+        }
         if self.account().is_none() {
             self.create_account(DEFAULT_SERVICE).await?;
         }
@@ -291,13 +277,22 @@ impl Sync {
         Ok(())
     }
 
-    /// The local copy, encrypted like the service's, plus the derived key so
-    /// startup skips the slow key derivation. Readable only by this user,
-    /// like sync.json, which holds the password anyway.
+    /// The local copy, encrypted like the service's, and the derived key so
+    /// startup skips the slow key derivation; all of it encrypted with the
+    /// vault's key. (Older Wisps kept that derived key in the file as it
+    /// was; such a file is read once and written again sealed.)
     fn load_cache(&self) -> bool {
         let Some(account) = self.account() else { return false };
+        let Some(vault_key) = vault::get().data_key() else { return false };
         let Ok(text) = fs::read_to_string(cache_path()) else { return false };
         let Ok(file) = serde_json::from_str::<Json>(&text) else { return false };
+        let (file, legacy) = match file.get("sealed").and_then(Json::as_str) {
+            Some(blob) => match decrypt(&vault_key, blob).ok().and_then(|t| serde_json::from_str::<Json>(&t).ok()) {
+                Some(inner) => (inner, false),
+                None => return false,
+            },
+            None => (file, true),
+        };
         if file["service"].as_str() != Some(&account.service) || file["id"].as_str() != Some(&account.id) {
             return false;
         }
@@ -323,6 +318,9 @@ impl Sync {
             pending,
             checked: None,
         });
+        if legacy {
+            self.save_cache();
+        }
         true
     }
 
@@ -333,19 +331,11 @@ impl Sync {
             let Some(s) = state.as_ref() else { return };
             json!({ "base": s.base, "last_updated": s.last_updated, "pending": s.pending }).to_string()
         };
+        let Some(vault_key) = vault::get().data_key() else { return };
         let Ok(blob) = encrypt(&key, &data) else { return };
-        let file = json!({ "service": account.service, "id": account.id, "key": B64.encode(key), "data": blob });
-        let path = cache_path();
-        let _ = fs::create_dir_all(config::data_dir());
-        let tmp = path.with_extension("tmp");
-        if fs::write(&tmp, file.to_string()).is_ok() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
-            }
-            let _ = fs::rename(&tmp, &path);
-        }
+        let inner = json!({ "service": account.service, "id": account.id, "key": B64.encode(key), "data": blob });
+        let Ok(sealed) = encrypt(&vault_key, &inner.to_string()) else { return };
+        let _ = vault::write_private(&cache_path(), &json!({ "sealed": sealed }).to_string());
     }
 
     // ---- talking to the service ----
@@ -908,11 +898,13 @@ mod live {
     use super::*;
 
     /// Decrypts the live sync record and prints entry titles (never descriptions).
-    /// Run: WISP_BLOB_FILE=blob.json cargo test -- --ignored live_titles --nocapture
+    /// Run: WISP_BLOB_FILE=blob.json WISP_SYNC_ID=... WISP_SYNC_PASSWORD=...
+    ///      cargo test -- --ignored live_titles --nocapture
     #[test]
     #[ignore]
     fn live_titles() {
-        let account = Account::load().expect("no sync.json");
+        let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k} isn't set"));
+        let account = Account { service: String::new(), id: var("WISP_SYNC_ID"), password: var("WISP_SYNC_PASSWORD") };
         let raw = fs::read_to_string(std::env::var("WISP_BLOB_FILE").unwrap()).unwrap();
         let data: Json = serde_json::from_str(&raw).unwrap();
         let mut key = [0u8; 32];

@@ -7,6 +7,7 @@ use crate::plugins::{self, PluginHost, PluginUi};
 use crate::privacy;
 use crate::state::{SavedTab, Store};
 use crate::sync::{self, Account, Sync};
+use crate::vault;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::cell::{Cell, RefCell};
@@ -1405,6 +1406,32 @@ impl BrowserWindow {
         ));
         vbox.append(&databases);
         vbox.append(&gtk::Button::builder().label("History (Ctrl+H)").action_name("win.history").build());
+        // Set, change or remove the password that locks saved passwords,
+        // bookmarks, history and tabs; or unlock them if that was put off.
+        let lock = gtk::Button::with_label("Wisp password…");
+        let w = Rc::downgrade(self);
+        lock.connect_clicked(move |b| {
+            let Some(win) = w.upgrade() else { return };
+            if let Some(p) = b.ancestor(gtk::Popover::static_type()).and_downcast::<gtk::Popover>() {
+                p.popdown();
+            }
+            let v = vault::get();
+            let kind = if !v.exists() {
+                vault::Ask::Setup
+            } else if !v.is_open() {
+                vault::Ask::Unlock
+            } else {
+                vault::Ask::Change
+            };
+            let shared = win.shared.clone();
+            vault::ask(&shared.app.clone(), Some(win.window.upcast_ref()), kind, move |ok| {
+                if ok {
+                    // Bookmarks (and the bar) come back now it's open.
+                    shared.sync.warm_up();
+                }
+            });
+        });
+        vbox.append(&lock);
         vbox.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 
         let heading = gtk::Label::builder().label("<b>Plugins</b>").use_markup(true).xalign(0.0).build();

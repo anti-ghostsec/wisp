@@ -140,12 +140,30 @@ All optional, from the ☰ menu:
   next time; tabs other than the first in each window load when you open
   them. Turning it off deletes the saved tabs.
 
-History and tabs are stored encrypted (AES-256-GCM). The key is kept
-separately, in `~/.config/wisp/state.key`, so the data folder on its own (a
-backup, a copied folder) reveals nothing. Someone who can read your files
-as you can read both; full-disk encryption covers that case.
+History and tabs are stored encrypted (AES-256-GCM), like everything else
+Wisp keeps; see [Wisp password](#wisp-password).
 **Clear cookies, site data and history** in the menu wipes them along with
 cookies and site storage.
+
+## Wisp password
+
+The first time it starts, Wisp asks for a password. It seals
+`~/.config/wisp/vault.json`, which holds the key everything Wisp keeps is
+encrypted with (saved passwords, bookmarks, history, tabs, plugin data) and
+your sync login; the sealing key is made from the password with Argon2id
+(64 MiB, 3 passes). Wisp asks for it once each time it starts. Without it
+none of those files can be read, even by someone with a copy of your home
+folder; it can't be recovered if you forget it.
+
+"Not now" starts Wisp locked: nothing is recorded or saved, and bookmarks
+and passwords can't be used until you unlock it (☰ → Wisp password…), which
+is also where you change or remove the password. Without a password the
+vault is sealed with a key kept beside it, which only stops it being read
+by accident.
+
+Older Wisps kept the sync login (`sync.json`) and the history key
+(`state.key`) unsealed; they're moved into the vault and wiped on the first
+start.
 
 ## What touches the disk
 
@@ -156,11 +174,10 @@ What Wisp does write (all readable only by you):
 | Path | What |
 |---|---|
 | `~/.config/wisp/config.json` | Settings |
-| `~/.config/wisp/sync.json` | Sync ID and password, in plain text, once sync is used |
-| `~/.local/share/wisp/sync-cache.json` | Encrypted copy of synced bookmarks and passwords, plus its key |
+| `~/.config/wisp/vault.json` | The key for everything below and the sync ID and password, sealed with your Wisp password |
+| `~/.local/share/wisp/sync-cache.json` | Synced bookmarks and passwords, encrypted |
 | `~/.local/share/wisp/history.enc`, `session.enc` | History and open tabs, encrypted, only when turned on |
-| `~/.config/wisp/state.key` | Their key |
-| `~/.local/share/wisp/plugin-data/` | What plugins store with `wisp.storage` (e.g. sites you chose "Never" for) |
+| `~/.local/share/wisp/plugin-data/` | What plugins store with `wisp.storage` (e.g. sites you chose "Never" for), encrypted |
 | `~/.cache/wisp/` | Ad-block filter lists and their compiled form |
 | Your download folder | Files you download |
 

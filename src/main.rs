@@ -10,6 +10,7 @@ mod plugins;
 mod privacy;
 mod state;
 mod sync;
+mod vault;
 mod adblock;
 
 use browser::{BrowserWindow, Shared};
@@ -56,6 +57,32 @@ fn main() -> glib::ExitCode {
     let cfg = RefCell::new(Some(cfg));
     let shared: Rc<RefCell<Option<Rc<Shared>>>> = Rc::new(RefCell::new(None));
     let on_exit = shared.clone();
+    // Links given while the vault's window is up.
+    let waiting: Rc<RefCell<Option<Vec<String>>>> = Rc::new(RefCell::new(None));
+    let open = {
+        let shared = shared.clone();
+        Rc::new(move |app: &gtk::Application, uris: Vec<String>, starting: bool| {
+            let shared = shared.borrow_mut().get_or_insert_with(|| Shared::new(app, cfg.take().unwrap_or_default())).clone();
+            // The first window of a run brings back the last session's tabs, if asked to.
+            let restored = if starting && uris.is_empty() { shared.restore_session() } else { None };
+            // Links from a later launch open as tabs in the window already open.
+            let reused = if !starting && !uris.is_empty() { shared.open_in_tabs(&uris) } else { None };
+            let window = restored.or(reused).unwrap_or_else(|| BrowserWindow::new(&shared, &uris));
+            window.warn_if_outdated();
+            if starting {
+                shared.ask_about_shadowed_plugins();
+            }
+            if let Ok(path) = std::env::var("WISP_SCREENSHOT") {
+                let secs = std::env::var("WISP_SCREENSHOT_DELAY").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
+                window.screenshot_and_quit(path, std::time::Duration::from_secs(secs));
+            }
+            // For testing pop-ups: WISP_OPEN_ACTION=plugin/action presses that button.
+            if let Some((plugin, action)) = std::env::var("WISP_OPEN_ACTION").ok().and_then(|a| a.split_once('/').map(|(p, a)| (p.to_string(), a.to_string()))) {
+                let w = window.clone();
+                glib::timeout_add_local_once(std::time::Duration::from_secs(3), move || w.run_plugin_action(&plugin, &action));
+            }
+        })
+    };
     app.connect_command_line(move |app, cmd| {
         let args: Vec<String> = cmd
             .arguments()
@@ -77,25 +104,25 @@ fn main() -> glib::ExitCode {
             })
             .collect();
         let starting = shared.borrow().is_none();
-        let shared = shared.borrow_mut().get_or_insert_with(|| Shared::new(app, cfg.take().unwrap_or_default())).clone();
-        // The first window of a run brings back the last session's tabs, if asked to.
-        let restored = if starting && uris.is_empty() { shared.restore_session() } else { None };
-        // Links from a later launch open as tabs in the window already open.
-        let reused = if !starting && !uris.is_empty() { shared.open_in_tabs(&uris) } else { None };
-        let window = restored.or(reused).unwrap_or_else(|| BrowserWindow::new(&shared, &uris));
-        window.warn_if_outdated();
-        if starting {
-            shared.ask_about_shadowed_plugins();
+        // Before the first window: the vault (saved passwords, bookmarks,
+        // history, tabs) is set up, or unlocked. Links that come in while
+        // it asks open once it's done.
+        if starting && vault::get().wants_password() && std::env::var_os("WISP_SCREENSHOT").is_none() {
+            let first = waiting.borrow().is_none();
+            waiting.borrow_mut().get_or_insert_with(Vec::new).extend(uris);
+            if first {
+                let kind = if vault::get().exists() { vault::Ask::Unlock } else { vault::Ask::Setup };
+                let hold = app.hold();
+                let (app2, open, waiting) = (app.clone(), open.clone(), waiting.clone());
+                vault::ask(app, None, kind, move |_| {
+                    let uris = waiting.borrow_mut().take().unwrap_or_default();
+                    open(&app2, uris, true);
+                    drop(hold);
+                });
+            }
+            return glib::ExitCode::SUCCESS;
         }
-        if let Ok(path) = std::env::var("WISP_SCREENSHOT") {
-            let secs = std::env::var("WISP_SCREENSHOT_DELAY").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
-            window.screenshot_and_quit(path, std::time::Duration::from_secs(secs));
-        }
-        // For testing pop-ups: WISP_OPEN_ACTION=plugin/action presses that button.
-        if let Some((plugin, action)) = std::env::var("WISP_OPEN_ACTION").ok().and_then(|a| a.split_once('/').map(|(p, a)| (p.to_string(), a.to_string()))) {
-            let w = window.clone();
-            glib::timeout_add_local_once(std::time::Duration::from_secs(3), move || w.run_plugin_action(&plugin, &action));
-        }
+        open(app, uris, starting);
         glib::ExitCode::SUCCESS
     });
     // Write history that hasn't been saved yet.
