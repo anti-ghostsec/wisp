@@ -12,6 +12,7 @@ mod state;
 mod sync;
 mod vault;
 mod adblock;
+mod bigcopy;
 
 use browser::{BrowserWindow, Shared};
 use gtk::prelude::*;

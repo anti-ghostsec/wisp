@@ -8,6 +8,7 @@ use crate::privacy;
 use crate::state::{SavedTab, Store};
 use crate::sync::{self, Account, Sync};
 use crate::vault;
+use crate::bigcopy;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::cell::{Cell, RefCell};
@@ -160,6 +161,16 @@ impl Shared {
         let context = privacy::web_context(&cfg);
         let settings = privacy::settings(&cfg);
         let ucm = UserContentManager::new();
+        // Big copies go to Wisp's own clipboard sender (see bigcopy.rs); the
+        // handler is seen only by Wisp's page fixes, in their own world.
+        if bigcopy::available() {
+            ucm.register_script_message_handler("wispcopy", Some("wisp-page-fixes"));
+            ucm.connect_script_message_received(Some("wispcopy"), |_, value| {
+                if value.is_string() {
+                    bigcopy::copy(value.to_str().to_string());
+                }
+            });
+        }
         let sync = Sync::new();
         sync.warm_up();
         let plugins = PluginHost::new(&cfg, &ucm, sync.clone(), &session);

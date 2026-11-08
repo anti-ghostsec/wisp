@@ -84,6 +84,11 @@ it from there.
   frames are fine: untick it and they arrive as plain pictures, for a
   little more CPU. Environment variables you set yourself (`GSK_RENDERER`,
   `WEBKIT_*`) take precedence.
+- **Big copies**: GTK 4 hangs handing over a copy bigger than 256 KB on
+  X11 (Ctrl+A, Ctrl+C on most pages, with its formatting), and freezes
+  Wisp and whatever pastes from it. Past 50 000 characters Wisp copies the
+  plain text itself, in pieces as X11 expects; smaller copies keep their
+  formatting.
 - **Native blocklists**: content blocking is compiled bytecode, not JavaScript.
 
 ## Bookmarks & passwords
