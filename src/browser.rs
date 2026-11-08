@@ -1815,6 +1815,7 @@ impl BrowserWindow {
                 return true;
             }
             if let Some(win) = w.upgrade() {
+                adjust_media_menu(menu);
                 win.adjust_link_menu(menu, hit);
                 win.add_plugin_menu_items(view, menu, hit);
             }
@@ -2253,6 +2254,7 @@ impl BrowserWindow {
         let w = Rc::downgrade(self);
         view.connect_context_menu(move |_, menu, hit| {
             if let Some(win) = w.upgrade() {
+                adjust_media_menu(menu);
                 win.adjust_link_menu(menu, hit);
             }
             false
@@ -3144,6 +3146,31 @@ fn next_tab_id() -> u64 {
 fn is_cancellation(error: &glib::Error) -> bool {
     error.matches(webkit6::NetworkError::Cancelled)
         || error.matches(webkit6::PolicyError::FrameLoadInterruptedByPolicyChange)
+}
+
+/// A video's menu in plain words: "Loop" and "Fullscreen" for WebKit's
+/// "Toggle Media Loop Playback" and "Switch Video to Fullscreen" (the same
+/// actions under a shorter name), and nothing for showing the page's own
+/// controls or the media statistics.
+fn adjust_media_menu(menu: &webkit6::ContextMenu) {
+    use webkit6::ContextMenuAction as A;
+    for (pos, item) in menu.items().iter().enumerate().rev() {
+        let label = match item.stock_action() {
+            A::ToggleMediaLoop => "Loop",
+            A::EnterVideoFullscreen => "Fullscreen",
+            A::ToggleMediaControls => {
+                menu.remove(item);
+                continue;
+            }
+            _ if item.title().is_some_and(|t| t.contains("Media Statistics")) => {
+                menu.remove(item);
+                continue;
+            }
+            _ => continue,
+        };
+        menu.remove(item);
+        menu.insert(&webkit6::ContextMenuItem::from_stock_action_with_label(item.stock_action(), label), pos as i32);
+    }
 }
 
 fn html_escape(s: &str) -> String {
