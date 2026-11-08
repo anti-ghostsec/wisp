@@ -84,6 +84,11 @@ it from there.
   frames are fine: untick it and they arrive as plain pictures, for a
   little more CPU. Environment variables you set yourself (`GSK_RENDERER`,
   `WEBKIT_*`) take precedence.
+- **Dark browser** (☰ → *Dark browser (pages unchanged)*, `dark_ui`): Wisp's
+  own toolbar, tabs and menus in GTK's dark style. Web pages aren't told and
+  nothing is inverted, so sites look as they always do (the Dark Mode
+  plugin, which asks sites for their dark theme and inverts the rest, is
+  still there for those who want pages dark too).
 - **Big copies**: GTK 4 hangs handing over a copy bigger than 256 KB on
   X11 (Ctrl+A, Ctrl+C on most pages, with its formatting), and freezes
   Wisp and whatever pastes from it. Past 50 000 characters Wisp copies the

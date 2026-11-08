@@ -213,6 +213,7 @@ impl Shared {
         shared.register_scheme();
         shared.install_accels();
         install_css();
+        apply_dark_ui(shared.config.borrow().dark_ui);
         shared.install_plugin_accels();
         shared.apply_color_scheme();
         shared
@@ -1413,6 +1414,14 @@ impl BrowserWindow {
                 win.bookmarks_row.set_visible(on && !win.window.is_fullscreen());
             }
         }));
+        let dark = toggle("Dark browser (pages unchanged)", cfg.dark_ui, |shared, on| {
+            shared.config.borrow_mut().dark_ui = on;
+            apply_dark_ui(on);
+        });
+        dark.set_tooltip_text(Some(
+            "Wisp's own toolbar, tabs and menus in dark colours. Web pages stay as their sites made them: they aren't told, and nothing is inverted.",
+        ));
+        vbox.append(&dark);
         vbox.append(&toggle("Remember history", cfg.save_history, |shared, on| {
             shared.config.borrow_mut().save_history = on;
             if !on {
@@ -2945,14 +2954,38 @@ fn from_window(w: &gtk::Widget, p: &gtk::graphene::Point) -> Option<gtk::graphen
     native.compute_point(w, &p)
 }
 
+thread_local! {
+    /// GTK's own dark style, for Wisp's window only (`dark_ui`).
+    static DARK_UI: gtk::CssProvider = {
+        let css = gtk::CssProvider::new();
+        css.load_from_resource("/org/gtk/libgtk/theme/Default/Default-dark.css");
+        css
+    };
+}
+
+/// Wisp's window in GTK's dark style, or not. Only its own widgets: the
+/// dark-theme setting isn't touched, so web pages aren't told to go dark
+/// (sites' own dark themes and inverted pages clashed).
+fn apply_dark_ui(on: bool) {
+    let Some(display) = gdk::Display::default() else { return };
+    DARK_UI.with(|css| {
+        gtk::style_context_remove_provider_for_display(&display, css);
+        if on {
+            gtk::style_context_add_provider_for_display(&display, css, gtk::STYLE_PROVIDER_PRIORITY_SETTINGS + 1);
+        }
+    });
+}
+
 fn install_css() {
     let Some(display) = gdk::Display::default() else { return };
     let css = gtk::CssProvider::new();
     css.load_from_string(
-        ".wisp-tabs { padding: 3px 4px 0 4px; }
+        "/* Tabs on a darker strip of their own, unlike the bookmarks under the
+            address bar; the current one highlighted and underlined. */
+         .wisp-tabs { padding: 4px 4px 0 4px; background: alpha(black, 0.14); box-shadow: inset 0 1px alpha(black, 0.15); }
          .wisp-tab { padding: 1px 2px 1px 10px; margin: 0 1px; border-radius: 7px 7px 0 0; }
-         .wisp-tab:hover { background: alpha(currentColor, 0.06); }
-         .wisp-tab.active { background: alpha(currentColor, 0.13); }
+         .wisp-tab:hover { background: alpha(currentColor, 0.08); }
+         .wisp-tab.active { background: alpha(currentColor, 0.16); box-shadow: inset 0 -2px #3584e4; font-weight: 600; }
          .wisp-tab button { min-height: 22px; min-width: 22px; padding: 0; }
          .wisp-new-tab { min-height: 26px; min-width: 26px; padding: 0; }
          .wisp-downloads { padding: 4px; }

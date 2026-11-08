@@ -63,6 +63,9 @@ pub struct Config {
     pub download_dir: Option<String>,
     /// Show bookmarks under the address bar (Ctrl+Shift+B toggles).
     pub show_bookmarks_bar: bool,
+    /// Wisp's own window dark (toolbar, tabs, menus). Web pages are left as
+    /// their sites made them: they aren't told, and nothing is inverted.
+    pub dark_ui: bool,
     /// Remember visited pages (encrypted on disk). Off: nothing is kept.
     pub save_history: bool,
     /// Reopen your tabs when Wisp starts (encrypted on disk).
@@ -108,6 +111,7 @@ impl Default for Config {
             ask_download_location: true,
             download_dir: None,
             show_bookmarks_bar: true,
+            dark_ui: false,
             save_history: false,
             restore_tabs: false,
             plugins: BTreeMap::new(),
