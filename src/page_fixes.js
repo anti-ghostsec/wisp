@@ -28,13 +28,27 @@ addEventListener("copy", (e) => {
   send.postMessage(text);
 }, true);
 
-// YouTube shows its own menu on the first right-click and lets Wisp's
-// through on the next, but leaves its own open underneath: two menus, one
-// over the other. When Wisp's menu is coming (the page didn't stop it),
-// YouTube's player menu closes, as it does for any other click away.
+// YouTube's player has a menu of its own, shown on every other right-click
+// with Wisp's in between, and left open under Wisp's: which menu came
+// depended on how many clicks there had been, and two could show at once.
+// So on the player a right-click always gives Wisp's menu (Pause, Mute,
+// Loop, Fullscreen, Download video), the same every time. Shift+right-click
+// leaves the click to YouTube, for its menu (Copy video URL, Stats...).
+// This listens on the window before the page's own listeners, so YouTube
+// never hears of a plain right-click.
+const closeYouTubeMenu = () => {
+  for (const m of document.querySelectorAll(".ytp-contextmenu")) m.style.display = "none";
+};
+addEventListener("contextmenu", (e) => {
+  const t = e.target;
+  const player = t instanceof Element ? t.closest(".html5-video-player") : null;
+  if (!player || e.shiftKey) return;
+  e.stopImmediatePropagation();
+  closeYouTubeMenu();
+}, true);
+// A YouTube menu still open closes when Wisp's comes.
 addEventListener("contextmenu", (e) => {
   setTimeout(() => {
-    if (e.defaultPrevented) return;
-    for (const m of document.querySelectorAll(".ytp-contextmenu")) m.style.display = "none";
+    if (!e.defaultPrevented) closeYouTubeMenu();
   }, 0);
 });
