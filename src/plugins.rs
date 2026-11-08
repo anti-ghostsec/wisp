@@ -444,7 +444,9 @@ impl PluginHost {
             sync,
             http,
             ui: RefCell::new(None),
-            gpu_compositing: cfg.gpu_compositing || cfg.hardware_acceleration,
+            // WebKit always composites now (on the CPU when GPU compositing
+            // is off; privacy.rs), so pages have layers either way.
+            gpu_compositing: true,
             network: session.clone(),
             backgrounds: RefCell::new(HashMap::new()),
             natives: RefCell::new(HashMap::new()),

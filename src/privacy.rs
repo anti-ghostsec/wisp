@@ -76,11 +76,10 @@ pub fn settings(cfg: &Config) -> Settings {
     s.set_enable_webgl(cfg.webgl);
     s.set_enable_webrtc(cfg.webrtc);
     s.set_enable_media_stream(cfg.webrtc);
-    s.set_hardware_acceleration_policy(if cfg.gpu_compositing || cfg.hardware_acceleration {
-        HardwareAccelerationPolicy::Always
-    } else {
-        HardwareAccelerationPolicy::Never
-    });
+    // Always, even with GPU compositing off: then the drawing is done on the
+    // CPU instead (main.rs). WebKit's "Never" (2.54) aborts the page's process
+    // on YouTube a minute into a video.
+    s.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Always);
     // Back/forward page cache keeps whole pages alive in RAM.
     s.set_enable_page_cache(!cfg.low_memory_cache);
     s.set_enable_html5_database(cfg.site_databases);

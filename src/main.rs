@@ -173,7 +173,12 @@ fn configure_rendering(cfg: &config::Config) {
             vars.push(("WEBKIT_WEB_RENDER_DEVICE_FILE", node));
         }
     } else {
-        vars.push(("WEBKIT_DISABLE_DMABUF_RENDERER", "1".into()));
+        // GPU compositing off: the same drawing path, done on the CPU (Mesa's
+        // software GL and Skia's CPU renderer), frames shared in memory. Not
+        // WebKit's own "no compositing" mode, which aborts on YouTube.
+        vars.push(("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1".into()));
+        vars.push(("LIBGL_ALWAYS_SOFTWARE", "1".into()));
+        vars.push(("WEBKIT_SKIA_ENABLE_CPU_RENDERING", "1".into()));
     }
     for (key, value) in vars {
         if std::env::var_os(key).is_none() {
