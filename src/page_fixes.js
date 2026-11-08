@@ -27,3 +27,14 @@ addEventListener("copy", (e) => {
   e.stopImmediatePropagation();
   send.postMessage(text);
 }, true);
+
+// YouTube shows its own menu on the first right-click and lets Wisp's
+// through on the next, but leaves its own open underneath: two menus, one
+// over the other. When Wisp's menu is coming (the page didn't stop it),
+// YouTube's player menu closes, as it does for any other click away.
+addEventListener("contextmenu", (e) => {
+  setTimeout(() => {
+    if (e.defaultPrevented) return;
+    for (const m of document.querySelectorAll(".ytp-contextmenu")) m.style.display = "none";
+  }, 0);
+});

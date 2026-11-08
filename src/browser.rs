@@ -1809,6 +1809,11 @@ impl BrowserWindow {
         });
         let w = Rc::downgrade(self);
         view.connect_context_menu(move |view, menu, hit| {
+            // Empty: the page shows a menu of its own (YouTube's player).
+            // Plugins' items added to it made a second menu over the page's.
+            if menu.n_items() == 0 {
+                return true;
+            }
             if let Some(win) = w.upgrade() {
                 win.adjust_link_menu(menu, hit);
                 win.add_plugin_menu_items(view, menu, hit);
