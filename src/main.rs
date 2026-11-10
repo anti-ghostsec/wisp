@@ -10,6 +10,7 @@ mod plugins;
 mod privacy;
 mod state;
 mod sync;
+mod tooltip;
 mod vault;
 mod adblock;
 mod bigcopy;

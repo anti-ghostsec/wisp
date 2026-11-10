@@ -7,6 +7,7 @@ use crate::plugins::{self, PluginHost, PluginUi};
 use crate::privacy;
 use crate::state::{SavedTab, Store};
 use crate::sync::{self, Account, Sync};
+use crate::tooltip::PageTip;
 use crate::vault;
 use crate::bigcopy;
 use gtk::prelude::*;
@@ -724,6 +725,8 @@ pub struct BrowserWindow {
     /// Holds the notebook, and above it, unseen, the views of background
     /// tabs that are playing (`park`).
     stage: gtk::Overlay,
+    /// Pages' tooltips, drawn in the window (tooltip.rs).
+    page_tip: Rc<PageTip>,
     /// Our own tab strip (the notebook's is hidden), so "+" can sit right
     /// after the last tab.
     strip: gtk::Box,
@@ -924,6 +927,7 @@ impl BrowserWindow {
         vbox.append(&tab_bar);
         let stage = gtk::Overlay::builder().child(&notebook).vexpand(true).build();
         vbox.append(&stage);
+        let page_tip = PageTip::new(&window, &stage);
         window.set_child(Some(&vbox));
 
         let win = Rc::new(BrowserWindow {
@@ -931,6 +935,7 @@ impl BrowserWindow {
             window,
             notebook,
             stage,
+            page_tip,
             strip,
             strip_scroll,
 
@@ -1786,6 +1791,7 @@ impl BrowserWindow {
     }
 
     fn connect_view(self: &Rc<Self>, tab: &Rc<Tab>, view: &WebView) {
+        self.page_tip.watch(view);
         // Video, audio and subtitles the page loads, for plugins that asked ("media").
         let (w, t) = (Rc::downgrade(self), Rc::downgrade(tab));
         view.connect_resource_load_started(move |v, resource, _| {
