@@ -41,17 +41,20 @@ rustup_sha256=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
 rust_version=1.99.1
 if ! command -v cargo >/dev/null 2>&1; then
     [ "$(uname -m)" = x86_64 ] || { echo "build-linux: no Rust, and its installer is only known here for x86_64" >&2; exit 1; }
-    init=$(mktemp)
+    # In a folder of its own, under its own name: the installer goes by
+    # the name it's run as, and takes any other for one of Rust's tools.
+    tmp=$(mktemp -d)
+    init=$tmp/rustup-init
     curl --proto '=https' --tlsv1.2 -fsSL -o "$init" \
         "https://static.rust-lang.org/rustup/archive/$rustup_version/x86_64-unknown-linux-gnu/rustup-init"
     echo "$rustup_sha256  $init" | sha256sum -c - >/dev/null || {
         echo "build-linux: rustup-init $rustup_version isn't the file expected" >&2
-        rm -f "$init"
+        rm -rf "$tmp"
         exit 1
     }
     chmod +x "$init"
     "$init" -y -q --profile minimal --default-toolchain "$rust_version" -c clippy
-    rm -f "$init"
+    rm -rf "$tmp"
     . "$HOME/.cargo/env"
 fi
 if [ "${WISP_CHECK:-}" = 1 ]; then
