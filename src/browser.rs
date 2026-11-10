@@ -1456,6 +1456,13 @@ impl BrowserWindow {
             "Untick if videos play black while their sound and controls work: frames then reach the page as plain pictures (a little more CPU). Takes effect when Wisp is next started.",
         ));
         vbox.append(&gpu_video);
+        let no_jit = toggle("Safer JavaScript (slower)", cfg.no_jit, |shared, on| {
+            shared.config.borrow_mut().no_jit = on;
+        });
+        no_jit.set_tooltip_text(Some(
+            "Runs pages' scripts without the JIT compiler, which most browser exploits go through. Heavy sites and web apps get slower. Takes effect when Wisp is next started.",
+        ));
+        vbox.append(&no_jit);
         vbox.append(&gtk::Button::builder().label("History (Ctrl+H)").action_name("win.history").build());
         // Set, change or remove the password that locks saved passwords,
         // bookmarks, history and tabs; or unlock them if that was put off.

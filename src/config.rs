@@ -34,6 +34,11 @@ pub struct Config {
     /// Kinds of app links (e.g. "claude", "mailto") opened without asking.
     pub allowed_app_links: Vec<String>,
     pub webrtc: bool,
+    /// Run pages' JavaScript without the JIT compiler (interpreter only).
+    /// Most browser exploits go through the JIT, so this closes that door,
+    /// at the price of slower scripts on heavy sites. Takes effect when
+    /// Wisp next starts.
+    pub no_jit: bool,
     /// Custom user agent; null keeps WebKit's generic default.
     pub user_agent: Option<String>,
 
@@ -100,6 +105,7 @@ impl Default for Config {
             site_databases: true,
             allowed_app_links: Vec::new(),
             webrtc: false,
+            no_jit: false,
             user_agent: None,
             gpu_compositing: true,
             hardware_acceleration: false,

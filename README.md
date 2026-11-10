@@ -34,6 +34,11 @@ it from there.
 - **Disabled features**: WebGL, WebRTC, WebKit's own credential storage and
   script popups are off. The ad blocker also blocks third-party `<a ping>`
   beacons.
+- **Safer JavaScript** (☰ → *Safer JavaScript (slower)*, `no_jit`, off by
+  default): scripts run in JavaScriptCore's interpreter only, without the
+  JIT compiler that most browser exploits go through. Heavy sites and web
+  apps get slower. It takes effect when Wisp next starts, and a `JSC_useJIT`
+  you set yourself takes precedence.
 - **Site databases** (IndexedDB), which many sites and web apps need, are
   allowed: in the private session they stay in memory and are gone when Wisp
   quits. Untick **Allow site databases** in the ☰ menu to turn them off.

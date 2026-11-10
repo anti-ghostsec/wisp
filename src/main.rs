@@ -145,8 +145,9 @@ const HARDWARE_DECODERS: &[&str] = &[
     "nvmpeg2videodec", "nvh264sldec", "nvh265sldec",
 ];
 
-/// Pick the renderer through environment variables, before GTK or WebKit read
-/// them. Variables the user set themselves always win.
+/// Pick the renderer (and whether JavaScript is compiled) through environment
+/// variables, before GTK or WebKit read them. Variables the user set
+/// themselves always win.
 fn configure_rendering(cfg: &config::Config) {
     let mut vars: Vec<(&str, String)> = Vec::new();
     if !cfg.hardware_acceleration {
@@ -180,6 +181,11 @@ fn configure_rendering(cfg: &config::Config) {
         vars.push(("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1".into()));
         vars.push(("LIBGL_ALWAYS_SOFTWARE", "1".into()));
         vars.push(("WEBKIT_SKIA_ENABLE_CPU_RENDERING", "1".into()));
+    }
+    if cfg.no_jit {
+        // JavaScriptCore reads its options from JSC_* variables, and the web
+        // processes inherit ours: scripts then run in the interpreter only.
+        vars.push(("JSC_useJIT", "0".into()));
     }
     for (key, value) in vars {
         if std::env::var_os(key).is_none() {
