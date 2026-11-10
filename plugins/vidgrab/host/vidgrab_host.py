@@ -8,6 +8,7 @@ UTF-8 JSON).
 """
 
 import configparser
+import hashlib
 import json
 import os
 import re
@@ -191,6 +192,142 @@ UPDATE_STAMP = os.path.join(DATA_DIR, "last-update-check")
 UPDATE_EVERY = 7 * 24 * 3600
 install_lock = threading.Lock()
 
+# Where yt-dlp's releases are, and the key they're signed with: each release
+# has SHA2-256SUMS (the hash of every file in it) and SHA2-256SUMS.sig, that
+# list signed with yt-dlp's release key. VidGrab runs a yt-dlp it fetched
+# only if its hash is in a list that key signed, so a download that was
+# swapped or damaged on the way is never run.
+#
+# The key is the RSA key in public.key of yt-dlp's repository (fingerprint
+# AC0C BBE6 848D 6A87 3464 AF4E 57CF 6593 3B5A 7581). If yt-dlp ever signs
+# with another one, fetching stops working until the new key is put here.
+YTDLP_RELEASE = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/"
+YTDLP_KEY_E = 65537
+YTDLP_KEY_N = int(
+    "f4ac5f738c63c0b74b6196de42d5e6f371c0155fb35bd6ff9ea908e4f9611975"
+    "31135428375803399e002b947766fdf66acd480efa9018ac1eb418a7a0edf7d4"
+    "0dff92d1714a11975e44b61e01aaaa2a14a26d56a50e3bce04ecedbb75bad3b1"
+    "cb113400a80ef04cfb88b765aa9a92fad0d21ccabdbb2f1aa681d37798dbd9da"
+    "22cef9b3f49ca47f0be3e013d1f8cadcb00dad76cccc7a3e66429d538e3aee97"
+    "644166754c71750f5f143a9df4b701298d8b0ce712628d6c698d185a26561edc"
+    "d5a19bb590ece39d2e458eaff204724b2260c7ee93711e6eecfcf9dababa6640"
+    "5b4316bba4b7eda58439e9294986aff23fdc81ea1ff5fef673e84b8ba2a90e47"
+    "a5b941f012bee167e96a2120ef92e7bee38f7d920f298c976bfd00ed0a233308"
+    "0eac3f3ca334fe54290a92427e8a35d9ee01cd8e670169474a2bb7c320439823"
+    "adcbc9ce905a41904e28057df4945d61c308ef5a5cd84fdde8ea15680632d094"
+    "b2b6e4709916b9663bab9011cbfd391db48cdcae0353d7aab67c66895d5643c9"
+    "d7b88f49809411be1e4f4e49f2e4bb71ab3726aaf58ef538c705baecd7804f10"
+    "ef5f717c4a2ff08505bcd70d2bef02002b76aaa53289dc43fca271395f2faab3"
+    "27c10a162a96d7840c4dd027e92bae653a1d5c24e2227c284fb5a38ee14f28a7"
+    "6f7c7d463f86e7a9dcd39f32f10920c812d7f27cfb085fef4623b26493fcd98d",
+    16,
+)
+# When the newest signed list seen was signed, so an older release can't be
+# passed off as the latest.
+SIGNED_STAMP = os.path.join(DATA_DIR, "yt-dlp-signed")
+# The hashes OpenPGP signatures here may use, by OpenPGP number, with the
+# bytes that go before the hash in an RSA signature.
+SIGNATURE_HASHES = {
+    8: (hashlib.sha256, bytes.fromhex("3031300d060960864801650304020105000420")),
+    10: (hashlib.sha512, bytes.fromhex("3051300d060960864801650304020305000440")),
+}
+
+
+def verify_signature(data, sig):
+    """Check `sig`, a detached OpenPGP signature (as in SHA2-256SUMS.sig), on
+    `data` against yt-dlp's release key. Returns when it was signed (Unix
+    time); raises ValueError unless the signature is good."""
+    try:
+        first = sig[0]
+        if first & 0xC0 == 0xC0:  # new packet format
+            tag = first & 0x3F
+            if sig[1] < 192:
+                length, start = sig[1], 2
+            elif sig[1] < 224:
+                length, start = ((sig[1] - 192) << 8) + sig[2] + 192, 3
+            elif sig[1] == 255:
+                length, start = int.from_bytes(sig[2:6], "big"), 6
+            else:
+                raise ValueError("unsupported signature packet")
+        elif first & 0xC0 == 0x80 and first & 3 < 3:  # old packet format
+            tag = (first >> 2) & 0xF
+            size = 1 << (first & 3)
+            length, start = int.from_bytes(sig[1:1 + size], "big"), 1 + size
+        else:
+            raise ValueError("not an OpenPGP signature")
+        body = sig[start:]
+        # One signature packet and nothing else: version 4, over binary
+        # data, made with RSA.
+        if tag != 2 or length != len(body) or body[0] != 4 or body[1] != 0 or body[2] != 1:
+            raise ValueError("not a signature of the kind yt-dlp makes")
+        new_hash, prefix = SIGNATURE_HASHES[body[3]]
+        hashed_end = 6 + int.from_bytes(body[4:6], "big")
+        unhashed_end = hashed_end + 2 + int.from_bytes(body[hashed_end:hashed_end + 2], "big")
+        bits = int.from_bytes(body[unhashed_end + 2:unhashed_end + 4], "big")
+        value = body[unhashed_end + 4:]
+        if unhashed_end + 4 > len(body) or len(value) != (bits + 7) // 8:
+            raise ValueError("damaged signature")
+        signed = body[:hashed_end]
+        digest = new_hash(data + signed + b"\x04\xff" + len(signed).to_bytes(4, "big")).digest()
+        if digest[:2] != body[unhashed_end:unhashed_end + 2]:
+            raise ValueError("the signature isn't for this file")
+        # RSA (PKCS #1 v1.5): the signature, raised to the key's exponent,
+        # must be exactly the padded hash.
+        size = (YTDLP_KEY_N.bit_length() + 7) // 8
+        padded = b"\x00\x01" + b"\xff" * (size - 3 - len(prefix) - len(digest)) + b"\x00" + prefix + digest
+        number = int.from_bytes(value, "big")
+        if number >= YTDLP_KEY_N or pow(number, YTDLP_KEY_E, YTDLP_KEY_N) != int.from_bytes(padded, "big"):
+            raise ValueError("the signature isn't yt-dlp's")
+        # The time it was made is among the signed fields (subpacket 2).
+        i = 6
+        while i < hashed_end:
+            n = signed[i]
+            if n >= 192:
+                raise ValueError("unsupported signature packet")
+            if n == 5 and signed[i + 1] & 0x7F == 2:
+                return int.from_bytes(signed[i + 2:i + 6], "big")
+            i += 1 + n
+        raise ValueError("the signature has no date")
+    except (IndexError, KeyError):
+        raise ValueError("damaged signature") from None
+
+
+def listed_sha256(sums, name):
+    """The SHA-256 a SHA2-256SUMS list gives for the file `name`."""
+    for line in sums.decode("utf-8", "replace").splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].lstrip("*") == name and re.fullmatch(r"[0-9a-f]{64}", parts[0]):
+            return parts[0]
+    raise ValueError(f"{name} isn't in the list of hashes")
+
+
+def fetch(url, limit):
+    """What's at `url`, if it's at most `limit` bytes."""
+    with urllib.request.urlopen(url, timeout=120) as r:
+        data = r.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError(f"{url} is larger than expected")
+    return data
+
+
+def last_signed():
+    try:
+        with open(SIGNED_STAMP) as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def file_sha256(path):
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    return h.hexdigest()
+
 
 def handle_status(msg):
     ytdlp = find_ytdlp(msg.get("ytdlpPath"))
@@ -226,6 +363,12 @@ def handle_update(msg):
     ytdlp = find_ytdlp(msg.get("ytdlpPath"))
     if not ytdlp:
         send({"type": "update", "ok": False, "output": "yt-dlp not found"})
+        return
+    if ytdlp == [OWN_YTDLP]:
+        # The one VidGrab fetched: replaced the way it was fetched, checked
+        # against yt-dlp's signature.
+        ok, output = install_ytdlp(update=True)
+        send({"type": "update", "ok": ok, "output": output})
         return
     if ytdlp[0] == sys.executable:
         cmd = [sys.executable, "-m", "pip", "install", "--user", "-U", "yt-dlp"]
@@ -686,24 +829,42 @@ def handle_cancel(msg):
             pass
 
 
-def install_ytdlp():
-    """Fetch the official yt-dlp release into DATA_DIR (as install.sh --fetch-ytdlp does).
-    Returns (ok, message)."""
-    url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
+def install_ytdlp(update=False):
+    """Fetch the official yt-dlp release into DATA_DIR (as install.sh --fetch-ytdlp does),
+    or with `update` replace the one there if a newer release is out. The file
+    is kept only if its hash is in the release's signed list (see
+    YTDLP_RELEASE); nothing fetched is run before that. Returns (ok, message)."""
     with install_lock:
-        if os.access(OWN_YTDLP, os.X_OK):
+        if not update and os.access(OWN_YTDLP, os.X_OK):
             return True, f"yt-dlp is in {OWN_YTDLP}"
+        tmp = OWN_YTDLP + ".tmp"
         try:
             os.makedirs(DATA_DIR, exist_ok=True)
-            tmp = OWN_YTDLP + ".tmp"
-            with urllib.request.urlopen(url, timeout=120) as r, open(tmp, "wb") as f:
-                shutil.copyfileobj(r, f)
+            sums = fetch(YTDLP_RELEASE + "SHA2-256SUMS", 1 << 16)
+            signed_at = verify_signature(sums, fetch(YTDLP_RELEASE + "SHA2-256SUMS.sig", 1 << 14))
+            if signed_at < last_signed():
+                raise ValueError("the release offered is older than the one already seen")
+            want = listed_sha256(sums, "yt-dlp")
+            if os.access(OWN_YTDLP, os.X_OK) and file_sha256(OWN_YTDLP) == want:
+                touch(UPDATE_STAMP)
+                return True, "yt-dlp is up to date"
+            data = fetch(YTDLP_RELEASE + "yt-dlp", 64 << 20)
+            if hashlib.sha256(data).hexdigest() != want:
+                raise ValueError("the download doesn't match yt-dlp's signed list of hashes; try again later")
+            with open(tmp, "wb") as f:
+                f.write(data)
             os.chmod(tmp, 0o755)
             os.replace(tmp, OWN_YTDLP)
+            with open(SIGNED_STAMP, "w") as f:
+                f.write(str(signed_at))
             touch(UPDATE_STAMP)
             code, out, err = run_capture([OWN_YTDLP, "--version"], timeout=60)
             return code == 0, f"Installed yt-dlp {out} to {OWN_YTDLP}" if code == 0 else err
         except Exception as e:  # noqa: BLE001
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
             return False, f"Couldn't install yt-dlp: {e}"
 
 
@@ -732,15 +893,14 @@ def update_if_due():
             return
     except OSError:
         pass
-    if not install_lock.acquire(blocking=False):
+    if install_lock.locked():
         return
     try:
         touch(UPDATE_STAMP)
-        run_capture([OWN_YTDLP, "-U"], timeout=300)
+        # Not yt-dlp's own updater: that one doesn't check the signature.
+        install_ytdlp(update=True)
     except Exception:  # noqa: BLE001
         pass
-    finally:
-        install_lock.release()
 
 
 def handle_open(msg):

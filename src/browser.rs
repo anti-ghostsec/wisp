@@ -38,8 +38,12 @@ pub struct Shared {
     sync: Rc<Sync>,
     /// Sites the user allowed to open cross-site pop-ups this session.
     popup_allowed: RefCell<HashSet<String>>,
-    /// Hosts the user explicitly allowed to load over plain HTTP this session.
+    /// Sites (host and port, see `privacy::http_site`) the user explicitly
+    /// allowed to load over plain HTTP this session.
     http_allowed: RefCell<HashSet<String>>,
+    /// Goes in the history page's "Clear history" link: only that page
+    /// knows it, so no other page can clear history by opening the link.
+    history_token: String,
     views: RefCell<Vec<glib::WeakRef<WebView>>>,
     /// With `shared_web_process`, the views new tabs and new plugin views
     /// share a web process with. Plugins get one of their own, so a page
@@ -186,6 +190,7 @@ impl Shared {
             sync,
             popup_allowed: RefCell::new(HashSet::new()),
             http_allowed: RefCell::new(HashSet::new()),
+            history_token: random_token(),
             views: RefCell::new(Vec::new()),
             tab_anchor: RefCell::default(),
             plugin_anchor: RefCell::default(),
@@ -212,6 +217,7 @@ impl Shared {
         shared.plugins.set_ui(Rc::new(UiBridge(Rc::downgrade(&shared))));
         shared.plugins.sync_backgrounds();
         shared.register_scheme();
+        shared.update_https_filter(|| {});
         shared.install_accels();
         install_css();
         apply_dark_ui(shared.config.borrow().dark_ui);
@@ -525,9 +531,10 @@ impl Shared {
             let html = match req.path().as_deref() {
                 Some("start") | Some("") | None => start_page(&shared.config.borrow()),
                 Some("history") => {
-                    // Only the history page itself may clear history.
-                    let from_history = req.web_view().and_then(|v| v.uri()).is_some_and(|u| u.starts_with("wisp:history"));
-                    if from_history && req.uri().is_some_and(|u| u.ends_with("?clear")) {
+                    // Only the history page itself may clear history: its
+                    // link carries a token no other page can know.
+                    let clear = format!("?clear={}", shared.history_token);
+                    if req.uri().is_some_and(|u| u.ends_with(&clear)) {
                         shared.state.clear_history();
                     }
                     history_page(&shared)
@@ -668,7 +675,23 @@ impl Shared {
     /// Any live view, used as `related-view` so new tabs share its web process.
     fn rewrite(&self, uri: &str) -> Option<String> {
         let allowed = self.http_allowed.borrow();
-        privacy::rewrite_url(uri, &self.config.borrow(), |h| allowed.contains(h))
+        privacy::rewrite_url(uri, &self.config.borrow(), |site| allowed.contains(site))
+    }
+
+    /// Bring the content filter that upgrades http:// in line with the
+    /// HTTPS-only setting and the sites allowed over HTTP; `then` runs once
+    /// it's in force.
+    fn update_https_filter(self: &Rc<Self>, then: impl FnOnce() + 'static) {
+        let rules = self.config.borrow().https_only.then(|| {
+            let mut allowed: Vec<String> = self.http_allowed.borrow().iter().cloned().collect();
+            allowed.sort();
+            privacy::https_filter(&allowed)
+        });
+        let plugins = self.plugins.clone();
+        glib::spawn_future_local(async move {
+            plugins.set_own_filter(rules).await;
+            then();
+        });
     }
 
     /// Turn what the user typed into a URI.
@@ -697,6 +720,17 @@ impl Shared {
     }
 }
 
+/// The one use of "Continue over HTTP" a "secure connection failed" page
+/// has. Its link is `wisp:allow-http?<token>`: a page that opens such a
+/// link itself can't know the token, so it can't allow anything.
+struct HttpOffer {
+    token: String,
+    /// The http:// address to load, and to allow (its host and port).
+    http_uri: String,
+    /// The address the tab shows while the failure page is up.
+    shown_uri: String,
+}
+
 pub struct Tab {
     /// Unique for the run; plugins see it as tabId.
     id: u64,
@@ -711,6 +745,9 @@ pub struct Tab {
     last_active: Cell<Instant>,
     /// Original http:// URL when we upgraded the current load to https://.
     upgraded_from: RefCell<Option<String>>,
+    /// While the tab shows the "secure connection failed" page: what its
+    /// "Continue over HTTP" link may do.
+    http_offer: RefCell<Option<HttpOffer>>,
     /// Playing in the background: its view sits on the window's stage,
     /// unseen, instead of in its page (see `park`).
     parked: Cell<bool>,
@@ -1693,6 +1730,7 @@ impl BrowserWindow {
             state: RefCell::new(None),
             last_active: Cell::new(Instant::now()),
             upgraded_from: RefCell::new(None),
+            http_offer: RefCell::new(None),
             parked: Cell::new(false),
             opened_from: Cell::new(None),
         });
@@ -1885,6 +1923,10 @@ impl BrowserWindow {
                 // where HTTPS upgrades and tracking-param stripping belong.
                 LoadEvent::Started | LoadEvent::Redirected => {
                     let Some(uri) = v.uri() else { return };
+                    // Going somewhere else: the failure page's offer is over.
+                    if tab.http_offer.borrow().as_ref().is_some_and(|o| o.shown_uri != uri) {
+                        *tab.http_offer.borrow_mut() = None;
+                    }
                     if let Some(clean) = win.shared.rewrite(&uri) {
                         if uri.starts_with("http://") && clean.starts_with("https://") {
                             *tab.upgraded_from.borrow_mut() = Some(uri.to_string());
@@ -1924,7 +1966,9 @@ impl BrowserWindow {
             if !failing_uri.starts_with("https://") || !same_host || is_cancellation(error) {
                 return false;
             }
-            v.load_alternate_html(&https_failed_page(&original, error.message()), failing_uri, None);
+            let token = random_token();
+            v.load_alternate_html(&https_failed_page(&original, error.message(), &token), failing_uri, None);
+            *tab.http_offer.borrow_mut() = Some(HttpOffer { token, http_uri: original, shown_uri: failing_uri.to_string() });
             true
         });
 
@@ -1939,19 +1983,32 @@ impl BrowserWindow {
             let Some(action) = nav.navigation_action() else { return false };
             let Some(uri) = action.request().and_then(|r| r.uri()) else { return false };
 
-            // "Continue over HTTP" link on the HTTPS-failure page.
-            if let Some(target) = uri.strip_prefix("wisp:allow-http?") {
+            // "Continue over HTTP" on the HTTPS-failure page. Any page can
+            // open a wisp:allow-http link, so it only counts when it carries
+            // the token of the failure page this tab is showing, and was
+            // clicked. The token works once, for that page's site only.
+            if let Some(token) = uri.strip_prefix("wisp:allow-http?") {
                 decision.ignore();
-                let target = glib::Uri::unescape_string(target, None::<&str>).map(|s| s.to_string());
-                let expected = tab.upgraded_from.borrow().clone();
-                if let (Some(target), Some(expected)) = (target, expected)
-                    && target == expected {
-                        if let Some((_, host)) = privacy::scheme_and_host(&target) {
-                            win.shared.http_allowed.borrow_mut().insert(host.to_string());
-                        }
-                        v.load_uri(&target);
-                    }
+                let offer = tab.http_offer.borrow_mut().take();
+                let showing = v.uri();
+                if let Some(offer) = offer
+                    && continue_over_http(&offer, token, action.is_user_gesture(), showing.as_deref())
+                    && let Some(site) = privacy::http_site(&offer.http_uri)
+                {
+                    win.shared.http_allowed.borrow_mut().insert(site);
+                    // Loaded once the filter lets the site through.
+                    let v = v.clone();
+                    win.shared.update_https_filter(move || v.load_uri(&offer.http_uri));
+                }
                 return true;
+            }
+
+            // An http:// address the content filter is about to upgrade (see
+            // `privacy::https_filter`): remembered, so that if HTTPS fails
+            // the page that says so can offer plain HTTP. Navigations a page
+            // starts itself don't show their address when the load starts.
+            if uri.starts_with("http://") && win.shared.rewrite(&uri).is_some_and(|clean| clean.starts_with("https://")) {
+                *tab.upgraded_from.borrow_mut() = Some(uri.to_string());
             }
 
             // claude://, mailto:, magnet: and the like belong to other apps
@@ -2078,7 +2135,11 @@ impl BrowserWindow {
 
     fn navigate(self: &Rc<Self>, tab: &Rc<Tab>, uri: &str) {
         let view = self.view_of(tab);
+        let asked = uri;
         let uri = self.shared.rewrite(uri).unwrap_or_else(|| uri.to_string());
+        // An http:// address made https:// here: if that fails, the page
+        // that says so can offer plain HTTP.
+        *tab.upgraded_from.borrow_mut() = (asked.starts_with("http://") && uri.starts_with("https://")).then(|| asked.to_string());
         *tab.uri.borrow_mut() = uri.clone();
         *tab.state.borrow_mut() = None;
         view.load_uri(&uri);
@@ -2808,6 +2869,7 @@ impl BrowserWindow {
                 Ok(cfg) => {
                     cfg.save();
                     *shared.config.borrow_mut() = cfg;
+                    shared.update_https_filter(|| {});
                     d.close();
                 }
                 Err(e) => {
@@ -3190,8 +3252,22 @@ fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-fn https_failed_page(http_uri: &str, reason: &str) -> String {
-    let allow = format!("wisp:allow-http?{}", glib::Uri::escape_string(http_uri, None, false));
+/// Whether a `wisp:allow-http?<token>` link may use `offer`: it has the
+/// failure page's token, came from a click, and the tab still shows that
+/// page.
+fn continue_over_http(offer: &HttpOffer, token: &str, clicked: bool, showing: Option<&str>) -> bool {
+    clicked && !offer.token.is_empty() && token == offer.token && showing == Some(offer.shown_uri.as_str())
+}
+
+/// 128 random bits as hex: a token pages can't guess.
+fn random_token() -> String {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).expect("no OS randomness");
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn https_failed_page(http_uri: &str, reason: &str, token: &str) -> String {
+    let allow = format!("wisp:allow-http?{token}");
     format!(
         r#"<!doctype html><title>Secure connection failed</title>
 <style>body{{font-family:sans-serif;max-width:40em;margin:4em auto;padding:0 1em;line-height:1.5}}
@@ -3208,6 +3284,7 @@ a.btn{{display:inline-block;margin-top:1em;padding:.5em 1em;border:1px solid #c3
 
 /// wisp:history: newest first, grouped by day, filtered as you type.
 fn history_page(shared: &Shared) -> String {
+    let token = &shared.history_token;
     let enabled = shared.config.borrow().save_history;
     let visits = shared.state.history();
     let mut rows = String::new();
@@ -3242,7 +3319,7 @@ h2{{font-size:.95em;font-weight:600;margin:1.6em 0 .4em;color:GrayText}}
 .v{{display:flex;gap:1em;padding:.35em .4em;border-radius:5px;text-decoration:none;color:inherit;white-space:nowrap}}
 .v:hover{{background:#8882}} .t{{color:GrayText;width:3.2em;flex:none}} .n{{overflow:hidden;text-overflow:ellipsis;max-width:50%}}
 .u{{color:GrayText;overflow:hidden;text-overflow:ellipsis}} a.clear{{color:GrayText}} p{{color:GrayText}}</style>
-<header><h1>History</h1><input id=q type=search placeholder="Search history" autofocus><a class=clear href="wisp:history?clear" onclick="return confirm('Delete all history?')">Clear history</a></header>
+<header><h1>History</h1><input id=q type=search placeholder="Search history" autofocus><a class=clear href="wisp:history?clear={token}" onclick="return confirm('Delete all history?')">Clear history</a></header>
 <p>{note}</p><div id=list>{rows}</div>
 <script>q.oninput=()=>{{const s=q.value.toLowerCase();for(const a of document.querySelectorAll('.v'))a.hidden=s&&!a.textContent.toLowerCase().includes(s);for(const h of document.querySelectorAll('h2')){{let n=h.nextElementSibling,any=false;while(n&&n.tagName!=='H2'){{if(!n.hidden)any=true;n=n.nextElementSibling}}h.hidden=!any}}}}</script>"#
     )
@@ -3291,6 +3368,29 @@ mod tests {
         assert_eq!(short_address("wisp:start"), "wisp:start");
     }
     use super::*;
+
+    #[test]
+    fn continue_over_http_needs_the_failure_pages_token() {
+        let offer = HttpOffer { token: random_token(), http_uri: "http://a.com/".into(), shown_uri: "https://a.com/".into() };
+        let shown = Some("https://a.com/");
+        assert!(continue_over_http(&offer, &offer.token, true, shown));
+        // A page that opens the link itself: no token, or the address in its place.
+        assert!(!continue_over_http(&offer, "", true, shown));
+        assert!(!continue_over_http(&offer, "http%3A%2F%2Fa.com%2F", true, shown));
+        // Not a click, or the tab has moved on from the failure page.
+        assert!(!continue_over_http(&offer, &offer.token, false, shown));
+        assert!(!continue_over_http(&offer, &offer.token, true, Some("https://evil.example/")));
+        assert!(!continue_over_http(&offer, &offer.token, true, None));
+        let empty = HttpOffer { token: String::new(), ..offer };
+        assert!(!continue_over_http(&empty, "", true, shown));
+    }
+
+    #[test]
+    fn tokens_are_long_and_differ() {
+        let (a, b) = (random_token(), random_token());
+        assert_eq!(a.len(), 32);
+        assert_ne!(a, b);
+    }
 
     #[test]
     fn settings_are_checked() {

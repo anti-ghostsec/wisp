@@ -183,7 +183,9 @@ impl Config {
         let _ = fs::create_dir_all(config_dir());
         match serde_json::to_string_pretty(self) {
             Ok(text) => {
-                if let Err(e) = fs::write(&path, text) {
+                // Readable by you only, and replaced in one step: a crash
+                // half-way never leaves half a file.
+                if let Err(e) = crate::vault::write_private(&path, &text) {
                     eprintln!("wisp: cannot write {}: {e}", path.display());
                 }
             }

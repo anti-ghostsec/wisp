@@ -262,6 +262,10 @@ pub struct PluginHost {
     filter_store: UserContentFilterStore,
     /// Compiled filters per plugin: (identifier, filter).
     filters: RefCell<HashMap<String, Vec<(String, UserContentFilter)>>>,
+    /// Wisp's own filter (the HTTPS upgrade), kept through `apply`.
+    own_filter: RefCell<Option<(String, UserContentFilter)>>,
+    /// Counts `set_own_filter` calls, so the newest one wins.
+    own_filter_turn: Cell<u64>,
     storage: RefCell<HashMap<String, Map<String, Json>>>,
     session: RefCell<HashMap<String, Map<String, Json>>>,
     sync: Rc<Sync>,
@@ -439,6 +443,8 @@ impl PluginHost {
             ucm: ucm.clone(),
             filter_store: UserContentFilterStore::new(&store_dir.to_string_lossy()),
             filters: RefCell::new(HashMap::new()),
+            own_filter: RefCell::new(None),
+            own_filter_turn: Cell::new(0),
             storage: RefCell::new(HashMap::new()),
             session: RefCell::new(HashMap::new()),
             sync,
@@ -500,6 +506,9 @@ impl PluginHost {
         self.ucm.remove_all_scripts();
         self.ucm.remove_all_style_sheets();
         self.ucm.remove_all_filters();
+        if let Some((_, filter)) = &*self.own_filter.borrow() {
+            self.ucm.add_filter(filter);
+        }
         self.ucm.add_script(&UserScript::for_world(
             PAGE_FIXES,
             UserContentInjectedFrames::AllFrames,
@@ -737,6 +746,42 @@ impl PluginHost {
 
     // ---- content blocking ----
 
+    /// Wisp's own content filter, beside the plugins': `rules` take the
+    /// place of the ones before, None removes it. Done once it's in force.
+    pub async fn set_own_filter(&self, rules: Option<String>) {
+        let turn = self.own_filter_turn.get() + 1;
+        self.own_filter_turn.set(turn);
+        let new = match rules {
+            Some(json) => {
+                let ident = format!("wisp-own-{:016x}", hash(&json));
+                let bytes = glib::Bytes::from_owned(json.into_bytes());
+                match self.filter_store.save_future(&ident, &bytes).await {
+                    Ok(filter) => Some((ident, filter)),
+                    Err(e) => {
+                        eprintln!("wisp: cannot compile Wisp's own content filter: {e}");
+                        return;
+                    }
+                }
+            }
+            None => None,
+        };
+        // A later call is on its way, or got here first.
+        if self.own_filter_turn.get() != turn {
+            return;
+        }
+        let old = self.own_filter.replace(new.clone());
+        let same = old.as_ref().map(|(id, _)| id) == new.as_ref().map(|(id, _)| id);
+        if let Some((id, _)) = &old {
+            self.ucm.remove_filter_by_id(id);
+        }
+        if let Some((_, filter)) = &new {
+            self.ucm.add_filter(filter);
+        }
+        if let Some((id, _)) = old.filter(|_| !same) {
+            let _ = self.filter_store.remove_future(&id).await;
+        }
+    }
+
     fn install_filters(self: &Rc<Self>, p: &Rc<Plugin>) {
         if let Some(compiled) = self.filters.borrow().get(&p.manifest.id) {
             for (_, f) in compiled {
@@ -855,14 +900,27 @@ impl PluginHost {
         }
     }
 
+    /// A filter list, if it's no bigger than `MAX_LIST_BYTES`: read a piece
+    /// at a time, so a server can't make Wisp hold whatever it sends.
     async fn fetch_text(&self, url: &str) -> Result<String, String> {
         let msg = soup::Message::new("GET", url).map_err(|e| e.to_string())?;
-        let bytes = self.http.send_and_read_future(&msg, glib::Priority::LOW).await.map_err(|e| e.to_string())?;
+        let stream = self.http.send_future(&msg, glib::Priority::LOW).await.map_err(|e| e.to_string())?;
         let status = msg.status().into_glib();
         if status != 200 {
             return Err(format!("HTTP {status}"));
         }
-        String::from_utf8(bytes.to_vec()).map_err(|e| e.to_string())
+        let mut text = Vec::new();
+        loop {
+            let piece = stream.read_bytes_future(64 * 1024, glib::Priority::LOW).await.map_err(|e| e.to_string())?;
+            if piece.is_empty() {
+                break;
+            }
+            if over_limit(text.len(), piece.len()) {
+                return Err(format!("the list is larger than {} MB", MAX_LIST_BYTES / (1024 * 1024)));
+            }
+            text.extend_from_slice(&piece);
+        }
+        String::from_utf8(text).map_err(|e| e.to_string())
     }
 
     // ---- the wisp API ----
@@ -1226,6 +1284,15 @@ fn sanitize(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect()
 }
 
+/// The most a downloaded filter list may weigh. The big ones (EasyList,
+/// EasyPrivacy) are a few megabytes.
+const MAX_LIST_BYTES: usize = 32 * 1024 * 1024;
+
+/// Whether `more` bytes on top of `have` go past `MAX_LIST_BYTES`.
+fn over_limit(have: usize, more: usize) -> bool {
+    have.saturating_add(more) > MAX_LIST_BYTES
+}
+
 fn hash(s: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut h);
@@ -1244,5 +1311,18 @@ pub fn mime_for(path: &Path) -> &'static str {
         "jpg" | "jpeg" => "image/jpeg",
         "webp" => "image/webp",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filter_lists_have_a_size_limit() {
+        assert!(!over_limit(0, 64 * 1024));
+        assert!(!over_limit(MAX_LIST_BYTES - 1, 1));
+        assert!(over_limit(MAX_LIST_BYTES, 1));
+        assert!(over_limit(usize::MAX, 1));
     }
 }

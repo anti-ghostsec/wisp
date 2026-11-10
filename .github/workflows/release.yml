@@ -20,13 +20,17 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Actions and the build image are named by their hash, not by a tag
+      # that can be moved to other code: what builds the release that gets
+      # signed only changes when this file does.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # Clippy and the tests run first: if either fails, nothing is built.
       - name: Check and build on Debian trixie
         run: >
           docker run --rm -v "$PWD:/src" -w /src -e WISP_COMMIT="$GITHUB_SHA" -e WISP_CHECK=1
-          debian:trixie .github/build-linux.sh dist
+          debian:trixie@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a4791b25ea8a6
+          .github/build-linux.sh dist
 
       # The trusted comment names the commit and its time, so the updater
       # can tell this build is the one it was told about, and never goes

@@ -19,8 +19,13 @@ it from there.
 
 - **Private session**: an ephemeral network session, so cookies, cache and
   site storage never touch the disk. Set `persistent_profile: true` to keep them.
-- **HTTPS-only**: http:// pages are upgraded. If HTTPS fails, a warning page
-  lets you continue over HTTP for that host, for this session only.
+- **HTTPS-only**: http:// pages and frames are upgraded before anything is
+  sent, sites given as a public IP address included; only this computer,
+  the local network (private and link-local addresses) and `.local`,
+  `.onion`, `.test` and `localhost` names stay on HTTP. If HTTPS fails, a
+  warning page lets you continue over HTTP for that host and port, for this
+  session only. Only that page's own button can do so: a web page can't
+  allow HTTP for another site.
 - **Tracking parameters** (`utm_*`, `fbclid`, `gclid`, …) are removed from URLs.
 - **Cookies and tracking**: third-party cookies are blocked, and WebKit's
   Intelligent Tracking Prevention is on.
@@ -106,7 +111,9 @@ it from there.
 The `bookmarks` (Ctrl+D, Ctrl+Shift+O) and `passwords` plugins sync through
 xBrowserSync, end-to-end encrypted. You don't need to set anything up: an
 account is created the first time you save something. To use your own sync
-ID and password, open ☰ → **Sync account…**.
+ID and password, open ☰ → **Sync account…**. A sync service must be reached
+over `https://` (one on this computer, or a `.onion` address, may be
+`http://`).
 
 Wisp keeps an encrypted copy of your synced data in
 `~/.local/share/wisp/sync-cache.json`, so logins and bookmarks are available
@@ -114,7 +121,9 @@ instantly. Changes are saved locally first and uploaded in the background;
 if you're offline, they're retried until they go through.
 
 **Passwords**: a key button appears in password fields (and in username
-fields on sites with saved logins). It lists the saved logins for the site,
+fields on sites with saved logins). It lists the saved logins for the site
+(the exact host they were saved on, `www.` aside: a login for
+`one.example.io` is never offered on `two.example.io`),
 offers **Generate strong password** (the most recently used login first,
 then the newest saved), and links to the password manager
 (the key in the toolbar), where you can view, edit, add and delete logins.
@@ -189,6 +198,12 @@ is also where you change or remove the password. Without a password the
 vault is sealed with a key kept beside it, which only stops it being read
 by accident.
 
+Wisp notes (in `~/.local/share/wisp/vault-protection`) whether the vault has
+a password. If `vault.json` turns up without one though you never removed it
+in Wisp, the file was replaced: Wisp says so when it starts and stays locked
+unless you choose to go on without a password. Keys and passwords are wiped
+from Wisp's memory when they're no longer needed.
+
 Older Wisps kept the sync login (`sync.json`) and the history key
 (`state.key`) unsealed; they're moved into the vault and wiped on the first
 start.
@@ -203,6 +218,7 @@ What Wisp does write (all readable only by you):
 |---|---|
 | `~/.config/wisp/config.json` | Settings |
 | `~/.config/wisp/vault.json` | The key for everything below and the sync ID and password, sealed with your Wisp password |
+| `~/.local/share/wisp/vault-protection` | Whether the vault has a password (`password` or `none`), to notice a replaced `vault.json` |
 | `~/.local/share/wisp/sync-cache.json` | Synced bookmarks and passwords, encrypted |
 | `~/.local/share/wisp/history.enc`, `session.enc` | History and open tabs, encrypted, only when turned on |
 | `~/.local/share/wisp/plugin-data/` | What plugins store with `wisp.storage` (e.g. sites you chose "Never" for), encrypted |
@@ -265,7 +281,11 @@ button, or right-click a page, video or link. On other sites it spots the
 video streams a page plays (start the video first). yt-dlp sets itself up
 the first time you use VidGrab (a few MB, into `~/.local/share/vidgrab`) and
 checks for updates weekly, since sites change and yt-dlp follows within
-days; a yt-dlp already on `PATH` is used as is. It needs `python3`. With
+days; a yt-dlp already on `PATH` is used as is. What VidGrab fetches is kept
+and run only if its SHA-256 is in the release's list of hashes
+(`SHA2-256SUMS`) and that list carries a good signature from yt-dlp's
+release key, which is built into the helper; a release older than the last
+one seen is refused. It needs `python3`. With
 `ffmpeg` (`sudo apt install ffmpeg`) you also get HD (sites send video and
 audio separately above 720p), MP3/M4A conversion and embedded metadata;
 without it, VidGrab downloads the best single-file version. When a site asks for a login,
@@ -294,7 +314,9 @@ unless you choose **Use Mine Instead** when Wisp asks. See
 
 Every push to `main` that passes clippy (warnings count) and the tests is
 built on Debian trixie and published as the newest release, signed with
-minisign. FerroOS's updater installs a build only if its signature checks out
+minisign. What the build uses is fixed by hash (the checkout action, the
+Debian image, Rust's installer) or by version (Rust), so it changes only
+when the workflow does. FerroOS's updater installs a build only if its signature checks out
 against [minisign.pub](minisign.pub), it is the commit announced, and it is
 no older than the one installed. To check a download yourself:
 

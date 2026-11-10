@@ -8,8 +8,12 @@
   if (location.protocol !== "https:" && !isLocal(location.hostname)) return;
   const hostOf = (u) => (isLocal(u.hostname) ? u.host : u.hostname.replace(/^www\./, ""));
   const host = hostOf(location);
-  // Logins are shared across a site's subdomains (accounts.example.com and
-  // example.com). A rough registrable domain is enough for that.
+  // Saved logins are offered on the host they were saved for and nowhere
+  // else (www. aside): what's saved for one.example.io must never be offered
+  // on two.example.io, which may belong to someone else. The rough site
+  // below only ties a login's steps together (a username typed on one
+  // host, the password on the next, the offer to save after the redirect);
+  // it never decides where a saved password goes.
   const siteOf = (h) =>
     isLocal(h.replace(/:\d+$/, "")) ? h : h.split(".").slice(/\.(co|com|org|net|gov|ac|edu|ne|or)\.[a-z]{2}$/.test(h) ? -3 : -2).join(".");
   const site = siteOf(host);
@@ -85,10 +89,13 @@
 
   // ---- saved logins ----
   let saved = null;
+  // Every saved login, whatever its host.
+  let everyLogin = [];
+  const savedFor = (h) => everyLogin.filter((e) => e.host === h);
   const loadSaved = async (fresh) => {
     if (saved && !fresh) return saved;
     const entries = await wisp.sync.list("p_");
-    saved = entries
+    everyLogin = entries
       .map((e) => {
         try {
           const d = JSON.parse(e.description || "{}");
@@ -98,7 +105,8 @@
           return null;
         }
       })
-      .filter((e) => e && e.password && siteOf(e.host) === site);
+      .filter((e) => e && e.password);
+    saved = savedFor(host);
     lastUsed = (await wisp.storage.get("used")) || {};
     // Forget logins that no longer exist.
     const ids = new Set(entries.map((e) => String(e.id)));
@@ -111,11 +119,9 @@
     return saved;
   };
   // When each login (by id) was last filled or used to log in, kept on this
-  // computer only. The most recently used come first, then the newest saved;
-  // logins saved on this exact host before the rest of the site's.
+  // computer only. The most recently used come first, then the newest saved.
   let lastUsed = {};
-  const sortSaved = () =>
-    saved.sort((a, b) => (lastUsed[b.id] || 0) - (lastUsed[a.id] || 0) || (b.host === host) - (a.host === host) || b.id - a.id);
+  const sortSaved = () => saved.sort((a, b) => (lastUsed[b.id] || 0) - (lastUsed[a.id] || 0) || b.id - a.id);
   // Sent at once, without waiting on anything: logging in usually leaves
   // the page within milliseconds.
   const markUsed = (cred) => {
@@ -424,7 +430,10 @@
     if (passwordFields().some((f) => !f.value)) return drop();
     const never = (await wisp.storage.get("never")) || [];
     if (never.includes(site) || never.includes(host)) return drop();
-    const creds = await loadSaved(true);
+    // The logins of the host the password was typed on, which a redirect
+    // may have left since.
+    await loadSaved(true);
+    const creds = savedFor(p.host);
     // Already saved, under any username.
     if (creds.some((c) => c.password === p.password)) return drop();
     let username = p.username;
@@ -455,7 +464,8 @@
         close();
         await wisp.session.remove("pending:" + site);
         try {
-          const list = await loadSaved(true);
+          await loadSaved(true);
+          const list = savedFor(cred.host);
           // The login being updated, or one saved without a username that
           // we now know the username of.
           const existing =

@@ -466,6 +466,9 @@ impl Sync {
     }
 
     async fn request(&self, method: &str, url: &str, body: Option<Json>) -> Result<Json, String> {
+        if !service_is_private(url) {
+            return Err("the sync service's address must start with https:// (plain http:// would show anyone on the network your sync id and let them change what's stored)".into());
+        }
         let msg = soup::Message::new(method, url).map_err(|e| format!("bad URL {url}: {e}"))?;
         if let Some(body) = body {
             let bytes = glib::Bytes::from_owned(body.to_string().into_bytes());
@@ -575,6 +578,22 @@ fn lzutf8_decompress(input: &[u8]) -> Vec<u8> {
         i += used;
     }
     out
+}
+
+/// A sync service is talked to over HTTPS only, except one on this
+/// computer or a Tor onion service (which is encrypted by Tor itself).
+fn service_is_private(url: &str) -> bool {
+    match crate::privacy::scheme_and_host(url) {
+        Some(("https", host)) => !host.is_empty(),
+        Some(("http", host)) => {
+            let host = host.to_ascii_lowercase();
+            host == "localhost"
+                || host.ends_with(".localhost")
+                || host.ends_with(".onion")
+                || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+        }
+        _ => false,
+    }
 }
 
 fn random_password() -> String {
@@ -806,6 +825,17 @@ fn check_prefix(item: &Json, allowed: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sync_services_are_https_or_on_this_computer() {
+        for ok in ["https://sync.example.org", "https://sync.example.org/api/bookmarks", "http://localhost:8080/info", "http://127.0.0.1:8080", "http://[::1]:8080/x", "http://abcdef.onion/info"] {
+            assert!(service_is_private(ok), "{ok}");
+        }
+        for bad in ["http://sync.example.org/info", "http://192.168.1.5:8080", "http://localhost.example.org", "ftp://sync.example.org", "sync.example.org", "", "https://"] {
+            assert!(!service_is_private(bad), "{bad}");
+        }
+    }
+
 
     #[test]
     fn crypto_round_trip() {
