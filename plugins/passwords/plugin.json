@@ -1,10 +1,11 @@
 {
   "id": "passwords",
   "name": "Passwords",
-  "version": "1.1",
+  "version": "1.2",
   "description": "Saves and fills logins, synced end-to-end encrypted with xBrowserSync (stored as p_ entries). HTTPS sites only.",
   "permissions": ["sync", "storage", "tabs", "clipboard"],
   "sync_prefixes": ["p_"],
+  "sync_by_site": true,
   "actions": [
     { "id": "list", "label": "Saved passwords", "icon": "icons/key-symbolic.svg", "popup": "list.html" }
   ],

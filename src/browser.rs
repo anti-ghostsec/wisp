@@ -396,6 +396,14 @@ impl Shared {
         if shared && anchor.is_none() {
             slot.borrow().set(Some(&view));
         }
+        // Each page loaded gets its plugins' keys (which page asks, for the
+        // plugin API), tabs, plugin pages and background pages alike.
+        let plugins = Rc::downgrade(&self.plugins);
+        view.connect_load_changed(move |v, event| {
+            if let (LoadEvent::Committed, Some(plugins)) = (event, plugins.upgrade()) {
+                plugins.page_loaded(v);
+            }
+        });
         view
     }
 

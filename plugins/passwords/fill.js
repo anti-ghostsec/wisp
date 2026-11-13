@@ -88,8 +88,10 @@
   };
 
   // ---- saved logins ----
+  // Wisp gives this page only the logins saved for its own host (the
+  // browser decides which page asks, not this script), so another site's
+  // are never in this page's process.
   let saved = null;
-  // Every saved login, whatever its host.
   let everyLogin = [];
   const savedFor = (h) => everyLogin.filter((e) => e.host === h);
   const loadSaved = async (fresh) => {
@@ -397,6 +399,9 @@
       origin: location.origin,
       at: Date.now(),
     };
+    // The page after a redirect, on another host, gets none of this host's
+    // logins: what it needs of them to offer saving is worked out here.
+    pending.known = saved && saved.map((c) => known(c, pending));
     wisp.session.set("pending:" + site, pending);
     markUsed(saved?.find((c) => c.password === password && (!pending.username || !c.username || c.username === pending.username)));
     watchForSuccess(pw);
@@ -417,6 +422,17 @@
     }, 500);
   };
 
+  // What the offer to save needs of a saved login: never its password.
+  const known = (c, p) => ({ id: c.id, username: c.username, same: c.password === p.password, current: p.values.includes(c.password) });
+  // The saved logins of the host a password was typed on, as `known`:
+  // fresh if it's this one, else as that page left them (none if it
+  // hadn't had them yet).
+  const knownFor = async (p) => {
+    if (p.host !== host) return p.known || [];
+    await loadSaved(true);
+    return savedFor(host).map((c) => known(c, p));
+  };
+
   let offered = false;
   const checkPending = async () => {
     if (offered) return;
@@ -432,15 +448,14 @@
     if (never.includes(site) || never.includes(host)) return drop();
     // The logins of the host the password was typed on, which a redirect
     // may have left since.
-    await loadSaved(true);
-    const creds = savedFor(p.host);
+    const creds = await knownFor(p);
     // Already saved, under any username.
-    if (creds.some((c) => c.password === p.password)) return drop();
+    if (creds.some((c) => c.same)) return drop();
     let username = p.username;
     let update = null;
     if (p.isNew) {
       // Change-password form: the current password picks the login to update.
-      update = creds.find((c) => p.values.includes(c.password)) || null;
+      update = creds.find((c) => c.current) || null;
       if (update) username = update.username;
     }
     if (!username) username = await recentUsername();
@@ -464,14 +479,13 @@
         close();
         await wisp.session.remove("pending:" + site);
         try {
-          await loadSaved(true);
-          const list = savedFor(cred.host);
+          const list = await knownFor(cred);
           // The login being updated, or one saved without a username that
           // we now know the username of.
           const existing =
             list.find((e) => e.id === cred.update) ||
             list.find((e) => e.username === cred.username) ||
-            (cred.username && list.find((e) => !e.username && e.password === cred.password));
+            (cred.username && list.find((e) => !e.username && e.same));
           const description = JSON.stringify({ username: cred.username, password: cred.password });
           if (existing) await wisp.sync.update(existing.id, { description });
           else await wisp.sync.add({ title: "p_" + cred.host, url: cred.origin, description });

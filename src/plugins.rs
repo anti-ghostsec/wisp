@@ -62,6 +62,13 @@ pub struct Manifest {
     /// Title prefixes of synced entries this plugin may see and change.
     #[serde(default)]
     pub sync_prefixes: Vec<String>,
+    /// A web page's scripts see only the synced entries of its own site (by
+    /// each entry's URL), add or change only those of the site, and remove
+    /// or move none: the plugin's own pages see them all. Wisp decides
+    /// which page asks, so a web page whose renderer has been taken over
+    /// still gets nothing of other sites (the Passwords plugin's logins).
+    #[serde(default)]
+    pub sync_by_site: bool,
     #[serde(default)]
     pub content_scripts: Vec<ContentScript>,
     #[serde(default)]
@@ -287,6 +294,25 @@ pub struct PluginHost {
     pub shadowed: Vec<(String, PathBuf)>,
     /// Toolbar badge text, by plugin id.
     badges: RefCell<HashMap<String, String>>,
+    /// The keys given to pages, each for one plugin in one view, and what
+    /// they may reach: see `page_loaded`.
+    pages: RefCell<HashMap<String, PageKey>>,
+}
+
+/// What a page given a key may reach of its plugin's synced entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageScope {
+    /// The plugin's own pages and background page: everything.
+    All,
+    /// A web page: its host (as the Passwords plugin keys logins) and the
+    /// rough site it belongs to.
+    Site { host: String, site: String },
+}
+
+struct PageKey {
+    plugin: String,
+    view: glib::WeakRef<WebView>,
+    scope: PageScope,
 }
 
 /// Your own plugins folder.
@@ -365,9 +391,19 @@ fn api_prelude(p: &Plugin, gpu_compositing: bool) -> String {
         r#"(() => {{
   if (globalThis.wisp) return;
   const handler = window.webkit && window.webkit.messageHandlers[{handler:?}];
-  const call = (op, args = {{}}) => handler
-    ? handler.postMessage({{ op, args }})
-    : Promise.reject(new Error("wisp API unavailable"));
+  // The page's key, given by Wisp when the page loads (see page_loaded):
+  // which page asks, as Wisp knows it.
+  // A synced-entries call made before the key has come waits for it a
+  // little.
+  let key = globalThis.__wispPageKey || null;
+  delete globalThis.__wispPageKey;
+  let gotKey;
+  const keyCame = new Promise((r) => {{ gotKey = r; }});
+  const call = async (op, args = {{}}) => {{
+    if (!handler) throw new Error("wisp API unavailable");
+    if (!key && op.startsWith("sync.")) await Promise.race([keyCame, new Promise((r) => setTimeout(r, 3000))]);
+    return handler.postMessage({{ op, args, key }});
+  }};
   const listeners = {{}};
   const handlers = [];
   const store = (prefix) => Object.freeze({{
@@ -420,6 +456,7 @@ fn api_prelude(p: &Plugin, gpu_compositing: bool) -> String {
       }}
       return null;
     }},
+    _key: (k) => {{ key = k; gotKey(); }},
     _emit: (type, data) => {{
       for (const fn of listeners[type] || []) {{
         try {{ fn(data); }} catch (e) {{ console.error(e); }}
@@ -460,6 +497,7 @@ impl PluginHost {
             native_denied: RefCell::default(),
             shadowed,
             badges: RefCell::new(HashMap::new()),
+            pages: RefCell::default(),
         });
         for p in &host.plugins {
             host.register_handler(p);
@@ -935,7 +973,8 @@ impl PluginHost {
         let reply = reply.clone();
         glib::spawn_future_local(async move {
             let op = msg["op"].as_str().unwrap_or("");
-            match host.dispatch(&p, op, &msg["args"]).await {
+            let scope = host.scope_of(&p, msg["key"].as_str());
+            match host.dispatch(&p, op, &msg["args"], scope).await {
                 Ok(result) => {
                     let text = serde_json::to_string(&result).unwrap_or_else(|_| "null".into());
                     reply.return_value(&javascriptcore::Value::from_json(&ctx, &text));
@@ -945,7 +984,7 @@ impl PluginHost {
         });
     }
 
-    async fn dispatch(self: &Rc<Self>, p: &Rc<Plugin>, op: &str, args: &Json) -> Result<Json, String> {
+    async fn dispatch(self: &Rc<Self>, p: &Rc<Plugin>, op: &str, args: &Json, scope: Option<PageScope>) -> Result<Json, String> {
         let need = |perm: &str| {
             if p.has_permission(perm) {
                 Ok(())
@@ -1015,7 +1054,14 @@ impl PluginHost {
             }
             ("sync", _) => {
                 need("sync")?;
-                self.dispatch_sync(p, verb, args).await
+                if !p.manifest.sync_by_site {
+                    return self.dispatch_sync(p, verb, args).await;
+                }
+                match scope {
+                    Some(PageScope::All) => self.dispatch_sync(p, verb, args).await,
+                    Some(PageScope::Site { host, site }) => self.dispatch_sync_for_site(p, verb, args, &host, &site).await,
+                    None => Err("this page can't use the plugin's synced entries".into()),
+                }
             }
             ("tabs", "open") => {
                 need("tabs")?;
@@ -1185,6 +1231,68 @@ impl PluginHost {
         }
     }
 
+    /// `sync.*` for a web page of a `sync_by_site` plugin: only its host's
+    /// entries are listed, and only its site's added to or changed.
+    async fn dispatch_sync_for_site(&self, p: &Plugin, verb: &str, args: &Json, host: &str, site: &str) -> Result<Json, String> {
+        let of_site = |url: &str| entry_host(url).is_some_and(|h| site_of(&h) == site);
+        match verb {
+            "list" => {
+                let all = self.dispatch_sync(p, verb, args).await?;
+                let mine = all.as_array().into_iter().flatten().filter(|e| e["url"].as_str().and_then(entry_host).as_deref() == Some(host));
+                Ok(Json::Array(mine.cloned().collect()))
+            }
+            "add" => {
+                if !args["entry"]["url"].as_str().is_some_and(of_site) {
+                    return Err("a page may only save entries for its own site".into());
+                }
+                self.dispatch_sync(p, verb, args).await
+            }
+            "update" => {
+                let id = args["id"].as_i64().ok_or("missing \"id\"")?;
+                let all = self.dispatch_sync(p, "list", &Json::Null).await?;
+                let entry = all.as_array().into_iter().flatten().find(|e| e["id"].as_i64() == Some(id));
+                let url_ok = |u: Option<&str>| u.is_some_and(of_site);
+                if !entry.is_some_and(|e| url_ok(e["url"].as_str())) || args["fields"].get("url").is_some_and(|u| !url_ok(u.as_str())) {
+                    return Err("a page may only change entries of its own site".into());
+                }
+                self.dispatch_sync(p, verb, args).await
+            }
+            "status" => self.dispatch_sync(p, verb, args).await,
+            _ => Err(format!("a web page can't use \"sync.{verb}\"")),
+        }
+    }
+
+    /// A page has loaded in `view` (its main frame committed): each plugin
+    /// is given a new key for it, the view's earlier keys no longer count.
+    /// The key says what the page may reach, from the address Wisp loaded,
+    /// not anything the page says.
+    pub fn page_loaded(&self, view: &WebView) {
+        let mut pages = self.pages.borrow_mut();
+        pages.retain(|_, k| k.view.upgrade().is_some_and(|v| &v != view));
+        let Some(uri) = view.uri() else { return };
+        for p in self.enabled() {
+            let scope = if uri.starts_with(&p.page_url("")) {
+                PageScope::All
+            } else if let Some(host) = entry_host(&uri) {
+                PageScope::Site { site: site_of(&host), host }
+            } else {
+                continue;
+            };
+            let key = page_key();
+            let js = format!("globalThis.wisp ? wisp._key({0:?}) : (globalThis.__wispPageKey = {0:?});", key);
+            view.evaluate_javascript(&js, Some(&p.world()), None, None::<&gio::Cancellable>, |_| {});
+            pages.insert(key, PageKey { plugin: p.manifest.id.clone(), view: view.downgrade(), scope });
+        }
+    }
+
+    /// What the page that sent `key` to plugin `p` may reach, if the key is
+    /// one Wisp gave it and its view is still open.
+    fn scope_of(&self, p: &Plugin, key: Option<&str>) -> Option<PageScope> {
+        let pages = self.pages.borrow();
+        let k = pages.get(key?)?;
+        (k.plugin == p.manifest.id && k.view.upgrade().is_some()).then(|| k.scope.clone())
+    }
+
     fn storage_path(p: &Plugin) -> PathBuf {
         vault::plugin_data_dir().join(format!("{}.json", p.key()))
     }
@@ -1239,6 +1347,64 @@ impl PluginHost {
         *m = updated;
         Ok(())
     }
+}
+
+/// 128 random bits as hex: a key no page can guess.
+fn page_key() -> String {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).expect("no OS randomness");
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// An address on this machine or the local network (a router, a NAS box):
+/// such a site is told apart by its port too.
+fn is_local(host: &str) -> bool {
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".test")
+        || host.starts_with('[')
+        || (host.split('.').count() == 4 && host.split('.').all(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())))
+}
+
+/// The host an http(s) address belongs to, as the Passwords plugin keys
+/// logins (its `hostOf`): without "www.", or with its port for a local
+/// address. None for other addresses.
+pub fn entry_host(url: &str) -> Option<String> {
+    let uri = glib::Uri::parse(url, glib::UriFlags::NONE).ok()?;
+    let scheme = uri.scheme().to_ascii_lowercase();
+    if scheme != "https" && scheme != "http" {
+        return None;
+    }
+    let host = uri.host()?.to_ascii_lowercase();
+    let host = if host.contains(':') && !host.starts_with('[') { format!("[{host}]") } else { host };
+    if host.is_empty() {
+        return None;
+    }
+    if is_local(&host) {
+        let default = if scheme == "https" { 443 } else { 80 };
+        let port = uri.port();
+        return Some(if port > 0 && port != default { format!("{host}:{port}") } else { host });
+    }
+    Some(host.strip_prefix("www.").unwrap_or(&host).to_string())
+}
+
+/// The rough site a host is part of, as the Passwords plugin ties a
+/// login's steps together (its `siteOf`): the last two labels, three for
+/// names like example.co.uk; a local address is its own.
+pub fn site_of(host: &str) -> String {
+    let bare = host.rsplit_once(':').filter(|(_, port)| port.chars().all(|c| c.is_ascii_digit())).map_or(host, |(h, _)| h);
+    if is_local(bare) {
+        return host.to_string();
+    }
+    let labels: Vec<&str> = host.split('.').collect();
+    let n = labels.len();
+    let second = ["co", "com", "org", "net", "gov", "ac", "edu", "ne", "or"];
+    let keep = if n >= 3 && second.contains(&labels[n - 2]) && labels[n - 1].len() == 2 && labels[n - 1].chars().all(|c| c.is_ascii_lowercase()) {
+        3
+    } else {
+        2
+    };
+    labels[n.saturating_sub(keep)..].join(".")
 }
 
 /// `wisp._emit(kind, data)` in a view, in the plugin's world.
@@ -1317,6 +1483,31 @@ pub fn mime_for(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_login_s_host_is_the_passwords_plugin_s() {
+        assert_eq!(entry_host("https://www.example.com/login").as_deref(), Some("example.com"));
+        assert_eq!(entry_host("https://Accounts.Example.COM/").as_deref(), Some("accounts.example.com"));
+        assert_eq!(entry_host("https://example.com:8443/").as_deref(), Some("example.com"), "ports only count locally");
+        assert_eq!(entry_host("http://192.168.1.1:8080/admin").as_deref(), Some("192.168.1.1:8080"));
+        assert_eq!(entry_host("http://192.168.1.1/").as_deref(), Some("192.168.1.1"));
+        assert_eq!(entry_host("https://localhost:443/").as_deref(), Some("localhost"), "the usual port isn't written");
+        assert_eq!(entry_host("http://[::1]:3000/").as_deref(), Some("[::1]:3000"));
+        assert_eq!(entry_host("wisp-plugin://passwords/list.html"), None);
+        assert_eq!(entry_host("about:blank"), None);
+        assert_eq!(entry_host("not a url"), None);
+    }
+
+    #[test]
+    fn a_site_is_the_plugin_s_rough_one() {
+        assert_eq!(site_of("accounts.example.com"), "example.com");
+        assert_eq!(site_of("example.com"), "example.com");
+        assert_eq!(site_of("login.bbc.co.uk"), "bbc.co.uk");
+        assert_eq!(site_of("co.uk"), "co.uk");
+        assert_eq!(site_of("192.168.1.1:8080"), "192.168.1.1:8080");
+        assert_eq!(site_of("app.localhost:3000"), "app.localhost:3000");
+        assert_ne!(site_of("evil.com"), site_of("example.com"));
+    }
 
     #[test]
     fn filter_lists_have_a_size_limit() {
