@@ -543,9 +543,11 @@ def build_download_cmd(ytdlp, msg):
 # yt-dlp errors that mean the site-specific extractor is broken or out of
 # date; the generic extractor can often still find the <video> on the page.
 # Errors a logged-in browser session usually fixes (bot checks, age gates,
-# members-only and private videos).
-NEEDS_LOGIN = re.compile(r"--cookies|Sign in to confirm|confirm your age|age.restricted|members.only|"
-                         r"login required|log in|logged.in|private video|HTTP Error 403", re.I)
+# members-only and private videos): only yt-dlp's own words for those, so a
+# page that merely says "log in", or a plain 403, doesn't hand the site your
+# browser's cookies.
+NEEDS_LOGIN = re.compile(r"Use --cookies|Sign in to confirm|confirm your age|age-restricted|members-only|"
+                         r"Private video\. Sign in|only available for registered users|requires authentication", re.I)
 EXTRACTOR_BROKEN = re.compile(r"Unable to extract|please report this issue|No video formats found|Unsupported URL")
 
 
@@ -903,12 +905,19 @@ def update_if_due():
         pass
 
 
-def handle_open(msg):
-    path = os.path.expanduser(msg.get("path") or default_download_dir())
-    if msg.get("reveal") and os.path.isfile(path):
+def folder_to_show(path):
+    """The folder Open shows for `path`: itself if it's a folder, otherwise the
+    one it's in. Never a file: opening one would run whatever opens it."""
+    path = os.path.realpath(os.path.expanduser(path))
+    if not os.path.isdir(path):
         path = os.path.dirname(path)
-    if os.path.exists(path):
-        subprocess.Popen(["xdg-open", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    return path if os.path.isdir(path) else None
+
+
+def handle_open(msg):
+    folder = folder_to_show(msg.get("path") or default_download_dir())
+    if folder:
+        subprocess.Popen(["xdg-open", folder], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 HANDLERS = {
@@ -944,4 +953,10 @@ def main():
 
 
 if __name__ == "__main__":
+    # install.sh --fetch-ytdlp: the same checked fetch, from a terminal. (The
+    # browser starts this with a manifest's path first, never this.)
+    if sys.argv[1:2] == ["--fetch-ytdlp"]:
+        ok, said = install_ytdlp(update=True)
+        print(said)
+        sys.exit(0 if ok else 1)
     main()

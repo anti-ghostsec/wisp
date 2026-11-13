@@ -1,10 +1,12 @@
 {
   "id": "bookmarks",
   "name": "Bookmarks",
-  "version": "1.0",
+  "version": "1.1",
   "description": "Bookmarks synced end-to-end encrypted with xBrowserSync (stored as b_ entries). Works without setup.",
   "permissions": ["sync", "tabs"],
   "sync_prefixes": ["b_"],
+  "sync_by_site": true,
+  "site_may_remove": true,
   "actions": [
     { "id": "toggle", "label": "Bookmark this page", "icon": "icons/star-symbolic.svg", "shortcut": "<Ctrl>d" },
     { "id": "list", "label": "Bookmarks", "icon": "icons/bookmarks-symbolic.svg", "shortcut": "<Ctrl><Shift>o", "popup": "list.html" }

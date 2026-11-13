@@ -63,12 +63,17 @@ pub struct Manifest {
     #[serde(default)]
     pub sync_prefixes: Vec<String>,
     /// A web page's scripts see only the synced entries of its own site (by
-    /// each entry's URL), add or change only those of the site, and remove
-    /// or move none: the plugin's own pages see them all. Wisp decides
+    /// each entry's URL), add or change only those of the site, move only
+    /// those (to the front), and remove none unless `site_may_remove`: the
+    /// plugin's own pages see them all. Wisp decides
     /// which page asks, so a web page whose renderer has been taken over
     /// still gets nothing of other sites (the Passwords plugin's logins).
     #[serde(default)]
     pub sync_by_site: bool,
+    /// With `sync_by_site`: a web page may also remove its own site's
+    /// entries (the Bookmarks star taking a bookmark away).
+    #[serde(default)]
+    pub site_may_remove: bool,
     #[serde(default)]
     pub content_scripts: Vec<ContentScript>,
     #[serde(default)]
@@ -1031,10 +1036,19 @@ impl PluginHost {
                 }
                 let map = if area == "storage" { &self.storage } else { &self.session };
                 let persist = area == "storage";
+                // Session values a web page keeps are its site's alone (the
+                // login Passwords is about to offer to save).
+                let key = || if persist { key() } else { session_key(scope.as_ref(), &key()?) };
                 match verb {
                     "get" => {
                         let k = key()?;
                         Ok(self.with_map(map, p, persist, |m| m.get(&k).cloned()).unwrap_or(Json::Null))
+                    }
+                    "keys" if !persist => {
+                        let mine = session_key(scope.as_ref(), "")?;
+                        Ok(self.with_map(map, p, persist, |m| {
+                            Json::from(m.keys().filter_map(|k| k.strip_prefix(mine.as_str())).map(str::to_owned).collect::<Vec<_>>())
+                        }))
                     }
                     "keys" => Ok(self.with_map(map, p, persist, |m| Json::from(m.keys().cloned().collect::<Vec<_>>()))),
                     "set" | "remove" => {
@@ -1257,6 +1271,29 @@ impl PluginHost {
                 }
                 self.dispatch_sync(p, verb, args).await
             }
+            "remove" | "move" => {
+                let id = args["id"].as_i64().ok_or("missing \"id\"")?;
+                if verb == "remove" && !p.manifest.site_may_remove {
+                    return Err("a web page can't use \"sync.remove\"".into());
+                }
+                let all = self.dispatch_sync(p, "list", &Json::Null).await?;
+                let all = all.as_array().map(Vec::as_slice).unwrap_or_default();
+                let Some(entry) = all.iter().find(|e| e["id"].as_i64() == Some(id) && e["url"].as_str().is_some_and(of_site)) else {
+                    return Err("a page may only change entries of its own site".into());
+                };
+                if verb == "remove" {
+                    return self.dispatch_sync(p, verb, args).await;
+                }
+                // To the front of its kind (the bookmarks bar), past entries
+                // the page never sees.
+                let title = entry["title"].as_str().unwrap_or("");
+                let prefix = p.manifest.sync_prefixes.iter().find(|px| title.starts_with(px.as_str()));
+                let first = all.iter().find(|e| prefix.is_some_and(|px| e["title"].as_str().is_some_and(|t| t.starts_with(px.as_str()))));
+                match first.and_then(|e| e["id"].as_i64()) {
+                    Some(target) if target != id => self.dispatch_sync(p, "move", &json!({ "id": id, "target": target, "after": false })).await,
+                    _ => Ok(Json::Null),
+                }
+            }
             "status" => self.dispatch_sync(p, verb, args).await,
             _ => Err(format!("a web page can't use \"sync.{verb}\"")),
         }
@@ -1369,6 +1406,17 @@ fn is_local(host: &str) -> bool {
 /// The host an http(s) address belongs to, as the Passwords plugin keys
 /// logins (its `hostOf`): without "www.", or with its port for a local
 /// address. None for other addresses.
+/// Where a session value is kept: a web page's under its site (so another
+/// site's page can't read it), the plugin's own pages' as named. A page Wisp
+/// gave no key keeps nothing.
+fn session_key(scope: Option<&PageScope>, key: &str) -> Result<String, String> {
+    match scope {
+        Some(PageScope::All) => Ok(key.to_owned()),
+        Some(PageScope::Site { site, .. }) => Ok(format!("{site}\u{1}{key}")),
+        None => Err("this page can't keep session values".into()),
+    }
+}
+
 pub fn entry_host(url: &str) -> Option<String> {
     let uri = glib::Uri::parse(url, glib::UriFlags::NONE).ok()?;
     let scheme = uri.scheme().to_ascii_lowercase();
@@ -1483,6 +1531,17 @@ pub fn mime_for(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_keeps_session_values_for_its_site_alone() {
+        let a = PageScope::Site { host: "login.example.com".into(), site: "example.com".into() };
+        let b = PageScope::Site { host: "evil.test".into(), site: "evil.test".into() };
+        let ka = session_key(Some(&a), "pending:example.com").unwrap();
+        assert_ne!(ka, session_key(Some(&b), "pending:example.com").unwrap());
+        assert!(ka.starts_with(&session_key(Some(&a), "").unwrap()));
+        assert_eq!(session_key(Some(&PageScope::All), "x").unwrap(), "x");
+        assert!(session_key(None, "x").is_err());
+    }
 
     #[test]
     fn a_login_s_host_is_the_passwords_plugin_s() {

@@ -1,4 +1,6 @@
 // Toggle a bookmark for the current page when the toolbar star (Ctrl+D) is used.
+// A web page is only shown its own site's bookmarks (Wisp sees to that), and
+// may only add, remove or move those.
 wisp.on("action", async ({ id }) => {
   if (id !== "toggle") return;
   try {
@@ -12,7 +14,7 @@ wisp.on("action", async ({ id }) => {
       const title = (document.title || location.hostname).trim();
       const id = await wisp.sync.add({ title: "b_" + title, url });
       // New bookmarks go first on the bar, where you'll see them.
-      if (all.length) await wisp.sync.move(id, all[0].id, false);
+      await wisp.sync.move(id);
       wispToast("Bookmarked");
     }
   } catch (e) {

@@ -200,5 +200,36 @@ class Install(unittest.TestCase):
         self.assertIn("older", message)
 
 
+
+class NeedsLogin(unittest.TestCase):
+    def test_yt_dlps_words(self):
+        for err in ["ERROR: [youtube] abc: Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies",
+                    "ERROR: [youtube] abc: Sign in to confirm your age. This video may be inappropriate",
+                    "ERROR: [youtube] abc: Join this channel to get access to members-only content",
+                    "ERROR: [youtube] abc: Private video. Sign in if you've been granted access to this video"]:
+            self.assertTrue(v.NEEDS_LOGIN.search(err), err)
+
+    def test_not_for_any_page(self):
+        for err in ["ERROR: unable to download video data: HTTP Error 403: Forbidden",
+                    "ERROR: [generic] Please log in to continue",
+                    "ERROR: Unsupported URL: https://example.com/login"]:
+            self.assertFalse(v.NEEDS_LOGIN.search(err), err)
+
+
+class OpenShowsFolders(unittest.TestCase):
+    def test_only_folders(self):
+        d = tempfile.mkdtemp()
+        try:
+            f = os.path.join(d, "clip.mp4")
+            open(f, "w").close()
+            self.assertEqual(v.folder_to_show(f), os.path.realpath(d))
+            self.assertEqual(v.folder_to_show(d), os.path.realpath(d))
+            evil = os.path.join(d, "run.desktop")
+            open(evil, "w").close()
+            self.assertEqual(v.folder_to_show(evil), os.path.realpath(d))
+            self.assertIsNone(v.folder_to_show("/no/such/place/x"))
+        finally:
+            shutil.rmtree(d)
+
 if __name__ == "__main__":
     unittest.main()

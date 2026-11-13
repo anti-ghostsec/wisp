@@ -115,6 +115,12 @@ ID and password, open ☰ → **Sync account…**. A sync service must be reache
 over `https://` (one on this computer, or a `.onion` address, may be
 `http://`).
 
+The sync password is all that protects your data on the service: the key
+comes from it by PBKDF2-SHA256 (250,000 rounds, salted with the sync ID), as
+xBrowserSync's apps do, so someone holding a copy can try passwords at
+leisure. The one Wisp makes is random and strong; if you use your own, make
+it long (a passphrase of five or more random words).
+
 Wisp keeps an encrypted copy of your synced data in
 `~/.local/share/wisp/sync-cache.json`, so logins and bookmarks are available
 instantly. Changes are saved locally first and uploaded in the background;

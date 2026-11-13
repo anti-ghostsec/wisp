@@ -1311,7 +1311,9 @@ impl BrowserWindow {
         }
         let intro = gtk::Label::builder()
             .label("Bookmarks and passwords are encrypted on this device and synced with xBrowserSync. \
-                    Enter the same sync ID and password on another device to share them.")
+                    Enter the same sync ID and password on another device to share them. \
+                    The password is all that keeps the service from reading them: if you choose \
+                    your own, make it long (the one Wisp makes is random).")
             .wrap(true)
             .xalign(0.0)
             .max_width_chars(56)
