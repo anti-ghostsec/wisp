@@ -870,6 +870,12 @@ impl BrowserWindow {
             .vscrollbar_policy(gtk::PolicyType::Never)
             .propagate_natural_width(true)
             .build();
+        // The strip scrolls only to the tab being shown (`highlight_tab`),
+        // not to wherever the keyboard focus lands: closing a tab takes the
+        // focus from its close button, which would scroll it to the start.
+        if let Some(viewport) = strip_scroll.child().and_downcast::<gtk::Viewport>() {
+            viewport.set_scroll_to_focus(false);
+        }
         // The mouse wheel scrolls through tabs that don't fit.
         let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
         let adj = strip_scroll.hadjustment();
@@ -2266,6 +2272,9 @@ impl BrowserWindow {
     }
 
     fn close_tab(self: &Rc<Self>, tab: &Rc<Tab>) {
+        // Where the strip was scrolled to: closing a tab leaves the others
+        // where they were, not back at the start.
+        let at = self.strip_scroll.hadjustment().value();
         if tab.parked.replace(false)
             && let Some(view) = tab.view.borrow().as_ref()
         {
@@ -2281,7 +2290,19 @@ impl BrowserWindow {
         tab.view.borrow_mut().take();
         if self.tabs.borrow().is_empty() {
             self.window.close();
+            return;
         }
+        // Once the strip is laid out without it: as it was (as far as it
+        // still goes), with the tab now shown in view.
+        let w = Rc::downgrade(self);
+        glib::idle_add_local_once(move || {
+            let Some(win) = w.upgrade() else { return };
+            let adj = win.strip_scroll.hadjustment();
+            adj.set_value(at.min(adj.upper() - adj.page_size()).max(0.0));
+            if let Some(current) = win.current_tab() {
+                win.highlight_tab(&current);
+            }
+        });
     }
 
     /// Right-click menu entries of enabled plugins.
@@ -2365,17 +2386,19 @@ impl BrowserWindow {
     fn adjust_link_menu(self: &Rc<Self>, menu: &webkit6::ContextMenu, hit: &webkit6::HitTestResult) {
         use webkit6::ContextMenuAction as A;
         for (pos, item) in menu.items().iter().enumerate().rev() {
-            let (label, uri) = match item.stock_action() {
+            let (name, label, uri) = match item.stock_action() {
                 A::OpenLink => {
                     menu.remove(item);
                     continue;
                 }
-                A::OpenLinkInNewWindow => ("Open in New Tab", hit.link_uri()),
-                A::OpenImageInNewWindow => ("Open Image in New Tab", hit.image_uri()),
+                A::OpenLinkInNewWindow => ("open-link-in-tab", "Open in New Tab", hit.link_uri()),
+                A::OpenImageInNewWindow => ("open-image-in-tab", "Open Image in New Tab", hit.image_uri()),
                 _ => continue,
             };
             let Some(uri) = uri else { continue };
-            let action = gio::SimpleAction::new("open-in-tab", None);
+            // A name of its own for each: the menu keeps one action per name,
+            // so on a linked picture both entries would open the picture.
+            let action = gio::SimpleAction::new(name, None);
             let (w, uri) = (Rc::downgrade(self), uri.to_string());
             action.connect_activate(move |_, _| {
                 if let Some(win) = w.upgrade() {
