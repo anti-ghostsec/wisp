@@ -141,7 +141,8 @@ fn is_tracking_param(name: &str) -> bool {
     TRACKING_PARAMS.contains(&name) || TRACKING_PREFIXES.iter().any(|p| name.starts_with(p))
 }
 
-fn strip_params(uri: &str) -> Option<String> {
+/// `uri` without its tracking parameters, if it had any.
+pub fn strip_params(uri: &str) -> Option<String> {
     let (before_frag, frag) = match uri.split_once('#') {
         Some((a, b)) => (a, Some(b)),
         None => (uri, None),

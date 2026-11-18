@@ -7,6 +7,7 @@
 //! folders Wisp keeps its files in ([`config::set_dirs`]). All of it runs
 //! on one thread, the host's UI (or core) thread.
 
+pub mod address;
 pub mod adblock;
 pub mod config;
 pub mod plugins;

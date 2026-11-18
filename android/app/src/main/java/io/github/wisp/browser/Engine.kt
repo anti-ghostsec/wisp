@@ -1,0 +1,268 @@
+package io.github.wisp.browser
+
+import android.content.Context
+import android.util.Log
+import org.json.JSONObject
+import org.mozilla.geckoview.ContentBlocking
+import org.mozilla.geckoview.GeckoPreferenceController
+import org.mozilla.geckoview.GeckoPreferenceController.SetGeckoPreference
+import org.mozilla.geckoview.GeckoResult
+import org.mozilla.geckoview.GeckoRuntime
+import org.mozilla.geckoview.GeckoRuntimeSettings
+import org.mozilla.geckoview.GeckoWebExecutor
+import org.mozilla.geckoview.WebExtension
+import org.mozilla.geckoview.WebExtensionController
+import org.mozilla.geckoview.WebRequest
+import uniffi.wisp_ffi.Core
+import uniffi.wisp_ffi.Host
+import uniffi.wisp_ffi.PluginInfo
+import java.io.File
+import java.util.concurrent.Executors
+
+/**
+ * Wisp's engine on Android: one GeckoRuntime with Wisp's privacy settings,
+ * the Rust core (wisp-core), and Wisp's plugins as built-in extensions.
+ */
+object Engine {
+    private const val TAG = "wisp"
+    /** The app's own settings, beside wisp-core's (config.json). */
+    const val PREFS = "wisp-android"
+    /** Orbot's SOCKS port. */
+    const val ORBOT_PORT = 9050
+
+    lateinit var runtime: GeckoRuntime
+        private set
+    lateinit var core: Core
+        private set
+    private lateinit var web: GeckoWebExecutor
+    private val io = Executors.newCachedThreadPool()
+
+    /** Each enabled plugin's extension, by plugin id. */
+    val extensions = mutableMapOf<String, WebExtension>()
+    var plugins: List<PluginInfo> = emptyList()
+        private set
+
+    /** wisp-core's settings (config.json), read when the engine starts. */
+    lateinit var config: JSONObject
+        private set
+
+    val started get() = ::runtime.isInitialized
+
+    fun start(context: Context) {
+        if (started) return
+        val app = context.applicationContext
+        val pluginDir = unpackManifests(app)
+        core = Core(
+            File(app.filesDir, "config").path,
+            File(app.filesDir, "data").path,
+            File(app.cacheDir, "wisp").path,
+            pluginDir.path,
+            object : Host {
+                override fun http(id: ULong, method: String, url: String, body: String?) = fetch(id, method, url, body)
+            },
+        )
+        config = JSONObject(core.configJson())
+        plugins = core.plugins()
+        val dark = plugins.any { it.enabled && it.colorScheme == "dark" }
+        val cfg = config
+        val blocking = ContentBlocking.Settings.Builder()
+            .antiTracking(if (cfg.optBoolean("tracking_prevention", true)) ContentBlocking.AntiTracking.STRICT else ContentBlocking.AntiTracking.DEFAULT)
+            .enhancedTrackingProtectionLevel(if (cfg.optBoolean("tracking_prevention", true)) ContentBlocking.EtpLevel.STRICT else ContentBlocking.EtpLevel.DEFAULT)
+            .strictSocialTrackingProtection(true)
+            .cookieBehavior(cookieBehavior(cfg))
+            .cookieBehaviorPrivateMode(cookieBehavior(cfg))
+            .cookiePurging(true)
+            // Safe Browsing asks Google about the pages you visit.
+            .safeBrowsing(ContentBlocking.SafeBrowsing.NONE)
+            .queryParameterStrippingEnabled(cfg.optBoolean("strip_tracking_params", true))
+            .queryParameterStrippingPrivateBrowsingEnabled(cfg.optBoolean("strip_tracking_params", true))
+            .build()
+        val settings = GeckoRuntimeSettings.Builder()
+            .javaScriptEnabled(cfg.optBoolean("javascript", true))
+            .globalPrivacyControlEnabled(true)
+            .loginAutofillEnabled(false)
+            .remoteDebuggingEnabled(false)
+            .aboutConfigEnabled(false)
+            // Pages' console in logcat, for debug builds only.
+            .consoleOutput(app.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0)
+            .allowInsecureConnections(if (cfg.optBoolean("https_only", true)) GeckoRuntimeSettings.HTTPS_ONLY else GeckoRuntimeSettings.ALLOW_ALL)
+            .preferredColorScheme(if (dark) GeckoRuntimeSettings.COLOR_SCHEME_DARK else GeckoRuntimeSettings.COLOR_SCHEME_SYSTEM)
+            .contentBlocking(blocking)
+            .isolatedProcessEnabled(true)
+            .build()
+        runtime = GeckoRuntime.create(app, settings)
+        web = GeckoWebExecutor(runtime)
+        applyPrefs(app)
+    }
+
+    private fun cookieBehavior(cfg: JSONObject) =
+        if (cfg.optBoolean("block_third_party_cookies", true)) ContentBlocking.CookieBehavior.ACCEPT_FIRST_PARTY
+        else ContentBlocking.CookieBehavior.ACCEPT_FIRST_PARTY_AND_ISOLATE_OTHERS
+
+    fun torEnabled(context: Context) =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("tor", false)
+
+    /**
+     * Gecko settings GeckoView has no call for: what desktop Wisp turns off
+     * in WebKit (WebGL, WebRTC, the JIT with Safer JavaScript), Gecko's own
+     * fingerprinting protection, and the route: straight out (your VPN, if
+     * one is on), or through Orbot's SOCKS port with names looked up there.
+     */
+    fun applyPrefs(context: Context): GeckoResult<Map<String, Boolean>> {
+        val cfg = config
+        val tor = torEnabled(context)
+        val noJit = cfg.optBoolean("no_jit", false)
+        val webrtc = cfg.optBoolean("webrtc", false) && !tor
+        val user = GeckoPreferenceController.PREF_BRANCH_USER
+        fun b(name: String, v: Boolean) = SetGeckoPreference.setBoolPref(name, v, user)
+        fun i(name: String, v: Int) = SetGeckoPreference.setIntPref(name, v, user)
+        fun s(name: String, v: String) = SetGeckoPreference.setStringPref(name, v, user)
+        val prefs = listOf(
+            b("webgl.disabled", !cfg.optBoolean("webgl", false)),
+            b("media.peerconnection.enabled", webrtc),
+            b("media.navigator.enabled", webrtc),
+            b("javascript.options.ion", !noJit),
+            b("javascript.options.baselinejit", !noJit),
+            b("javascript.options.native_regexp", !noJit),
+            b("javascript.options.wasm", !noJit),
+            b("javascript.options.asmjs", !noJit),
+            b("privacy.fingerprintingProtection", true),
+            b("privacy.fingerprintingProtection.pbmode", true),
+            b("geo.enabled", false),
+            b("dom.security.https_only_mode_send_http_background_request", false),
+            b("network.prefetch-next", false),
+            b("network.dns.disablePrefetch", true),
+            b("network.predictor.enabled", false),
+            b("browser.send_pings", false),
+            // Gecko's own checks for a captive portal and for being online
+            // ask Mozilla's servers every so often.
+            b("network.captive-portal-service.enabled", false),
+            b("network.connectivity-service.enabled", false),
+            // Proxy: 1 = the SOCKS settings below, 5 = the system's.
+            i("network.proxy.type", if (tor) 1 else 5),
+            s("network.proxy.socks", "127.0.0.1"),
+            i("network.proxy.socks_port", ORBOT_PORT),
+            i("network.proxy.socks_version", 5),
+            b("network.proxy.socks_remote_dns", true),
+            // Orbot not running: fail, never go around it.
+            b("network.proxy.failover_direct", !tor),
+            i("network.trr.mode", if (tor) 5 else 0),
+        )
+        return GeckoPreferenceController.setGeckoPrefs(prefs).map { result ->
+            val failed = result?.filterValues { !it }?.keys.orEmpty()
+            if (failed.isNotEmpty()) Log.w(TAG, "prefs not set: $failed")
+            result
+        }
+    }
+
+    /** What a Gecko pref is now, for checking (null if unset). */
+    fun pref(name: String): GeckoResult<Any?> = GeckoPreferenceController.getGeckoPref(name).map { it?.value }
+
+    /** The plugins' manifests, for wisp-core (it reads permissions and sync rules from them). */
+    private fun unpackManifests(app: Context): File {
+        val dir = File(app.filesDir, "plugins")
+        dir.deleteRecursively()
+        // "adblock+2" and the like are more of a plugin's blocking rules, no plugin of their own.
+        for (id in app.assets.list("extensions").orEmpty().filter { '+' !in it }) {
+            val target = File(dir, id).apply { mkdirs() }
+            app.assets.open("extensions/$id/plugin.json").use { input ->
+                File(target, "plugin.json").outputStream().use { input.copyTo(it) }
+            }
+        }
+        return dir
+    }
+
+    /**
+     * Install (or update) each plugin's extension and turn it on or off.
+     * A plugin with more blocking rules than Gecko takes from one extension
+     * (30,000) has the rest in extensions of their own, "<id>+2" and so on.
+     */
+    fun installExtensions(context: Context, onReady: () -> Unit) {
+        // One at a time: GeckoView takes one built-in install at a time.
+        val dirs = ArrayDeque(context.assets.list("extensions").orEmpty().toList())
+        fun next() {
+            val dir = dirs.removeFirstOrNull() ?: return onReady()
+            installOne(dir) { next() }
+        }
+        next()
+    }
+
+    private fun installOne(dir: String, done: () -> Unit) {
+        val controller = runtime.webExtensionController
+        val id = dir.substringBefore('+')
+        val part = dir != id
+        val info = plugins.find { it.id == id }
+        val extId = "${dir.replace('+', '-')}@plugins.wisp"
+        controller.ensureBuiltIn("resource://android/assets/extensions/$dir/", extId)
+            .then { ext ->
+                if (ext == null || ext.metaData.allowedInPrivateBrowsing) GeckoResult.fromValue(ext)
+                else controller.setAllowedInPrivateBrowsing(ext, true)
+            }
+            // Manifest V3 asks for access to sites separately: the
+            // plugins' scripts run on every site, as on desktop.
+            .then { ext ->
+                if (ext == null || part || ext.metaData.grantedOptionalOrigins.contains("<all_urls>")) GeckoResult.fromValue(ext)
+                else controller.addOptionalPermissions(extId, arrayOf(), arrayOf("<all_urls>"), arrayOf())
+            }
+            .then { ext ->
+                when {
+                    ext == null -> GeckoResult.fromValue(null)
+                    info?.enabled == true && !ext.metaData.enabled -> controller.enable(ext, WebExtensionController.EnableSource.APP)
+                    info?.enabled != true && ext.metaData.enabled -> controller.disable(ext, WebExtensionController.EnableSource.APP)
+                    else -> GeckoResult.fromValue(ext)
+                }
+            }
+            .accept({ ext ->
+                if (!part) {
+                    if (ext != null && info?.enabled == true) {
+                        extensions[id] = ext
+                        Plugins.attach(id, ext)
+                    } else {
+                        extensions.remove(id)
+                    }
+                }
+                done()
+            }, { e ->
+                Log.e(TAG, "extension $dir: $e")
+                done()
+            })
+    }
+
+    /** Turn a plugin on or off, now and for later. */
+    fun setPluginEnabled(context: Context, id: String, on: Boolean, done: () -> Unit) {
+        core.setPluginEnabled(id, on)
+        plugins = core.plugins()
+        installExtensions(context, done)
+    }
+
+    fun reloadConfig() {
+        config = JSONObject(core.configJson())
+    }
+
+    /** wisp-core's HTTP (sync), through Gecko's network: the same route as pages. */
+    private fun fetch(id: ULong, method: String, url: String, body: String?) {
+        val request = WebRequest.Builder(url).method(method).apply {
+            header("User-Agent", "wisp")
+            if (body != null) {
+                header("Content-Type", "application/json")
+                body(body)
+            }
+            cacheMode(WebRequest.CACHE_MODE_NO_STORE)
+        }.build()
+        web.fetch(request, GeckoWebExecutor.FETCH_FLAGS_ANONYMOUS or GeckoWebExecutor.FETCH_FLAGS_PRIVATE).accept({ response ->
+            if (response == null) {
+                core.httpDone(id, 0u, ByteArray(0), "no response")
+                return@accept
+            }
+            io.execute {
+                val bytes = try {
+                    response.body?.use { it.readBytes() } ?: ByteArray(0)
+                } catch (e: Exception) {
+                    core.httpDone(id, 0u, ByteArray(0), e.message ?: "read failed")
+                    return@execute
+                }
+                core.httpDone(id, response.statusCode.toUShort(), bytes, null)
+            }
+        }, { e -> core.httpDone(id, 0u, ByteArray(0), e?.message ?: "request failed") })
+    }
+}

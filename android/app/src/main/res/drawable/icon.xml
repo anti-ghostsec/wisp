@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A wisp of smoke on Wisp's grey. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp" android:height="48dp" android:viewportWidth="48" android:viewportHeight="48">
+    <path android:fillColor="#C0C0C0" android:pathData="M4,4h40v40h-40z" />
+    <path android:strokeColor="#000080" android:strokeWidth="3" android:strokeLineCap="round"
+        android:pathData="M14,36 C10,28 22,26 18,18 C15,12 24,8 30,12 C34,15 30,20 34,22 C38,24 38,30 34,34" />
+</vector>

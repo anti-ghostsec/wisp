@@ -497,14 +497,28 @@ pub fn user_plugin_dir() -> PathBuf {
 /// chosen to use it instead (`plugin_overrides`).
 pub fn plugin_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
+    if let Some(dir) = BUILT_IN.get() {
+        dirs.push(dir.clone());
+    }
     if let Ok(extra) = std::env::var("WISP_PLUGIN_PATH") {
         dirs.extend(std::env::split_paths(&extra));
     }
-    dirs.push(PathBuf::from("/usr/share/wisp/plugins"));
-    // Bundled plugins when running from the source tree.
-    dirs.push(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../plugins")));
+    #[cfg(not(target_os = "android"))]
+    {
+        dirs.push(PathBuf::from("/usr/share/wisp/plugins"));
+        // Bundled plugins when running from the source tree.
+        dirs.push(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../plugins")));
+    }
     dirs.push(user_plugin_dir());
     dirs
+}
+
+static BUILT_IN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Where the host keeps the plugins it comes with (Android unpacks their
+/// manifests from the app), searched first.
+pub fn set_built_in_dir(dir: PathBuf) {
+    let _ = BUILT_IN.set(dir);
 }
 
 /// The plugins found, and your own ones left out for having a built-in

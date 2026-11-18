@@ -1,0 +1,34 @@
+[package]
+name = "wisp-ffi"
+version = "0.1.0"
+edition = "2024"
+description = "wisp-core for Wisp on Android: its own thread, and bindings for Kotlin (UniFFI)"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "wisp_ffi"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[[bin]]
+name = "wisp-extensions"
+path = "src/bin/wisp-extensions.rs"
+
+[dependencies]
+wisp-core = { path = "../../core" }
+uniffi = { version = "0.32.2", features = ["cli"] }
+futures-executor = "0.3"
+futures-channel = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+serde_json = "1.0.154"
+
+[profile.release]
+lto = true
+codegen-units = 1
+# Symbols stay: the bindings are generated from the library's own metadata.
+strip = "debuginfo"
+opt-level = "s"

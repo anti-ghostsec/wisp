@@ -704,27 +704,7 @@ impl Shared {
 
     /// Turn what the user typed into a URI.
     fn resolve_input(&self, text: &str) -> String {
-        let t = text.trim();
-        // "ai what is…" asks Duck.ai instead of searching.
-        if let Some(q) = t.strip_prefix("ai ").map(str::trim).filter(|q| !q.is_empty()) {
-            return format!("https://duckduckgo.com/?q={}&ia=chat", glib::Uri::escape_string(q, None, false));
-        }
-        let has_scheme = t.contains("://")
-            || ["about:", "wisp:", "data:", "file:", "view-source:"].iter().any(|s| t.starts_with(s));
-        if has_scheme {
-            return t.to_string();
-        }
-        if !t.contains(char::is_whitespace) {
-            let host = t.split(['/', ':', '?', '#']).next().unwrap_or("");
-            if host == "localhost" || host.parse::<std::net::Ipv4Addr>().is_ok() {
-                return format!("http://{t}");
-            }
-            if host.contains('.') && !host.starts_with('.') && !host.ends_with('.') {
-                return format!("https://{t}");
-            }
-        }
-        let q = glib::Uri::escape_string(t, None, false);
-        self.config.borrow().search_url.replace("%s", &q)
+        wisp_core::address::resolve_input(text, &self.config.borrow().search_url)
     }
 }
 
@@ -3177,31 +3157,7 @@ fn shortcut_label(accel: &str) -> String {
 
 /// Approximate registrable domain ("news.bbc.co.uk" -> "bbc.co.uk").
 /// A link for another app rather than something a tab can show.
-fn is_app_link(uri: &str) -> bool {
-    let Some((scheme, _)) = uri.split_once(':') else { return false };
-    let web = ["http", "https", "file", "about", "data", "blob", "javascript", "wisp", "wisp-plugin", "view-source", "ws", "wss"];
-    let valid = !scheme.is_empty() && scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c));
-    valid && !web.contains(&scheme.to_ascii_lowercase().as_str())
-}
-
-fn site_of(uri: &str) -> String {
-    let host = privacy::scheme_and_host(uri).map(|(_, h)| h).unwrap_or("").to_ascii_lowercase();
-    if host.parse::<std::net::IpAddr>().is_ok() {
-        return host;
-    }
-    let labels: Vec<&str> = host.split('.').filter(|l| !l.is_empty()).collect();
-    let n = labels.len();
-    if n <= 2 {
-        return labels.join(".");
-    }
-    // Second-level public suffixes like co.uk, com.au, org.br.
-    let take = if labels[n - 1].len() == 2 && ["co", "com", "org", "net", "gov", "ac", "edu"].contains(&labels[n - 2]) {
-        3
-    } else {
-        2
-    };
-    labels[n - take..].join(".")
-}
+use wisp_core::address::{is_app_link, site_of};
 
 /// Settings text to a Config, refusing invalid JSON and unknown names (typos
 /// would otherwise be silently ignored).
@@ -3430,15 +3386,5 @@ mod tests {
         assert!(parse_settings(r#"{ "https_only": false }"#).is_ok_and(|c| !c.https_only));
         assert!(parse_settings(r#"{ "https_onyl": false }"#).unwrap_err().contains("https_onyl"));
         assert!(parse_settings(r#"{ "https_only": false, }"#).unwrap_err().starts_with("Line 1"));
-    }
-
-    #[test]
-    fn app_links() {
-        for uri in ["claude://claude.ai/login?code=x", "mailto:a@b.c", "magnet:?xt=urn", "steam://run/1"] {
-            assert!(is_app_link(uri), "{uri}");
-        }
-        for uri in ["https://claude.ai", "about:blank", "wisp:history", "wisp-plugin://x/p.html", "data:text/plain,x", "blob:https://a/b", "localhost"] {
-            assert!(!is_app_link(uri), "{uri}");
-        }
     }
 }

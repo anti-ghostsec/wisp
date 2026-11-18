@@ -6,6 +6,8 @@
 //! document/doc/all, domain=, match-case. Cosmetic (`##`) rules, regex rules
 //! and options WebKit can't express (redirect=, csp=, removeparam, ...) are
 //! skipped rather than approximated.
+//!
+//! `convert_dnr` turns the same lists into declarativeNetRequest rules.
 
 use serde_json::{Value as Json, json};
 
@@ -226,6 +228,203 @@ fn escape(s: &str) -> String {
     out
 }
 
+/// The same lists as declarativeNetRequest rules, for engines that take
+/// those (GeckoView's WebExtensions): the ABP pattern is DNR's own
+/// `urlFilter` syntax, so rules carry over as they are. What DNR can't
+/// express (regex rules, popup-only rules, the options above) is skipped,
+/// as for WebKit. Ids start at `first_id`.
+pub struct ConvertedDnr {
+    pub rules: Vec<Json>,
+    pub skipped: usize,
+}
+
+/// Every resource type, top-level pages included: a typeless `||host^`
+/// block keeps you off that host, as with WebKit.
+const DNR_ALL: &[&str] = &[
+    "main_frame", "sub_frame", "stylesheet", "script", "image", "font", "object", "xmlhttprequest", "ping",
+    "media", "websocket", "other",
+];
+
+pub fn convert_dnr(text: &str, first_id: u64) -> ConvertedDnr {
+    let mut rules = Vec::new();
+    let mut skipped = 0;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('!') || line.starts_with('[') {
+            continue;
+        }
+        if line.contains("##") || line.contains("#@#") || line.contains("#?#") || line.contains("#$#") || line.contains("#%#") {
+            continue; // cosmetic
+        }
+        match dnr_rule(line) {
+            Some(mut rule) => {
+                rule["id"] = json!(first_id + rules.len() as u64);
+                rules.push(rule);
+            }
+            None => skipped += 1,
+        }
+    }
+    rules.truncate(MAX_RULES);
+    ConvertedDnr { rules, skipped }
+}
+
+fn dnr_rule(line: &str) -> Option<Json> {
+    let (exception, line) = match line.strip_prefix("@@") {
+        Some(rest) => (true, rest),
+        None => (false, line),
+    };
+    let (pattern, options) = split_options(line);
+    if pattern.len() > 1 && pattern.starts_with('/') && pattern.ends_with('/') {
+        return None; // regex rule
+    }
+    if !pattern.is_ascii() || pattern.is_empty() || pattern.starts_with("||*") {
+        return None;
+    }
+    let body = pattern.strip_prefix("||").or_else(|| pattern.strip_prefix('|')).unwrap_or(pattern);
+    let body = body.strip_suffix('|').unwrap_or(body);
+    if body.contains('|') || body.is_empty() || body.chars().all(|c| c == '*') {
+        return None;
+    }
+    let host_anchored = pattern.starts_with("||");
+
+    let mut types: Vec<&str> = Vec::new();
+    let mut domain_type: Option<&str> = None;
+    let mut initiators: Vec<String> = Vec::new();
+    let mut excluded: Vec<String> = Vec::new();
+    let mut case_sensitive = false;
+    let mut important = false;
+    let mut all = false;
+    let mut popup_only = false;
+    for opt in options.split(',').filter(|o| !o.is_empty()) {
+        match opt {
+            "third-party" | "3p" => domain_type = Some("thirdParty"),
+            "~third-party" | "~3p" | "first-party" | "1p" => domain_type = Some("firstParty"),
+            "match-case" => case_sensitive = true,
+            "important" => important = true,
+            "all" => all = true,
+            "script" => types.push("script"),
+            "image" => types.push("image"),
+            "stylesheet" | "css" => types.push("stylesheet"),
+            "font" => types.push("font"),
+            "media" => types.push("media"),
+            "xmlhttprequest" | "xhr" => types.push("xmlhttprequest"),
+            "websocket" => types.push("websocket"),
+            "ping" | "beacon" => types.push("ping"),
+            "object" => types.push("object"),
+            "other" => types.push("other"),
+            "popup" | "popunder" => popup_only = true,
+            "document" | "doc" if !exception => types.push("main_frame"),
+            "subdocument" | "frame" => types.push("sub_frame"),
+            _ => {
+                let list = opt.strip_prefix("domain=")?;
+                for d in list.split('|') {
+                    let (neg, d) = match d.strip_prefix('~') {
+                        Some(rest) => (true, rest),
+                        None => (false, d),
+                    };
+                    if d.is_empty() || !d.is_ascii() || d.contains('*') {
+                        return None;
+                    }
+                    let d = d.to_ascii_lowercase();
+                    if neg { excluded.push(d) } else { initiators.push(d) }
+                }
+            }
+        }
+    }
+    // DNR has no pop-up type: a rule only for pop-ups is left to the
+    // browser's own pop-up blocking.
+    if popup_only && types.is_empty() && !all {
+        return None;
+    }
+    if all || (types.is_empty() && (host_anchored || exception)) {
+        types = DNR_ALL.to_vec();
+    }
+    let mut condition = json!({ "urlFilter": pattern.to_ascii_lowercase_unless(case_sensitive) });
+    if case_sensitive {
+        condition["isUrlFilterCaseSensitive"] = json!(true);
+    }
+    if !types.is_empty() {
+        types.sort_unstable();
+        types.dedup();
+        condition["resourceTypes"] = json!(types);
+    }
+    if let Some(dt) = domain_type {
+        condition["domainType"] = json!(dt);
+    }
+    if !initiators.is_empty() {
+        condition["initiatorDomains"] = json!(initiators);
+    }
+    if !excluded.is_empty() {
+        condition["excludedInitiatorDomains"] = json!(excluded);
+    }
+    let (action, priority) = match (exception, important) {
+        (true, _) => ("allow", 2),
+        (false, true) => ("block", 3),
+        (false, false) => ("block", 1),
+    };
+    Some(json!({ "priority": priority, "action": { "type": action }, "condition": condition }))
+}
+
+trait LowerUnless {
+    fn to_ascii_lowercase_unless(&self, keep: bool) -> String;
+}
+
+impl LowerUnless for str {
+    fn to_ascii_lowercase_unless(&self, keep: bool) -> String {
+        if keep { self.to_string() } else { self.to_ascii_lowercase() }
+    }
+}
+
+/// WebKit content-blocker rules (a plugin's own `blocklists`) as DNR rules:
+/// `||host^`-style patterns become `requestDomains`, other patterns a
+/// `regexFilter`. Only "block" rules carry over.
+pub fn webkit_to_dnr(rules: &Json, first_id: u64) -> Vec<Json> {
+    const HOST_START: &str = "^[^:]+://+([^:/]+\\.)?";
+    let mut out = Vec::new();
+    for rule in rules.as_array().into_iter().flatten() {
+        if rule["action"]["type"] != "block" {
+            continue;
+        }
+        let Some(filter) = rule["trigger"]["url-filter"].as_str() else { continue };
+        let host = filter
+            .strip_prefix(HOST_START)
+            .and_then(|r| r.strip_suffix("[:/]"))
+            .map(|h| h.replace("\\.", "."))
+            .filter(|h| h.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'));
+        let mut condition = match host {
+            Some(h) => json!({ "requestDomains": [h] }),
+            None => json!({ "regexFilter": filter }),
+        };
+        if let Some(lt) = rule["trigger"]["load-type"].as_array().and_then(|a| a.first()).and_then(Json::as_str) {
+            condition["domainType"] = json!(if lt == "third-party" { "thirdParty" } else { "firstParty" });
+        }
+        if let Some(types) = rule["trigger"]["resource-type"].as_array() {
+            let map = |t: &str| match t {
+                "document" => Some("main_frame"),
+                "image" => Some("image"),
+                "style-sheet" => Some("stylesheet"),
+                "script" => Some("script"),
+                "font" => Some("font"),
+                "raw" => Some("xmlhttprequest"),
+                "media" => Some("media"),
+                "ping" => Some("ping"),
+                "websocket" => Some("websocket"),
+                "svg-document" | "other" => Some("other"),
+                _ => None,
+            };
+            let mut t: Vec<&str> = types.iter().filter_map(Json::as_str).filter_map(map).collect();
+            t.sort_unstable();
+            t.dedup();
+            if t.is_empty() {
+                continue;
+            }
+            condition["resourceTypes"] = json!(t);
+        }
+        out.push(json!({ "id": first_id + out.len() as u64, "priority": 1, "action": { "type": "block" }, "condition": condition }));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +468,39 @@ mod tests {
         assert_eq!(c.rules, 2);
         assert_eq!(rules[0]["action"]["type"], "block");
         assert_eq!(rules[1]["action"]["type"], "ignore-previous-rules");
+    }
+
+    #[test]
+    fn dnr_rules() {
+        let c = convert_dnr("! comment\n||ads.example.com^\n@@||ads.example.com/ok^$script\n/banner/*$image,third-party,domain=a.com|~b.a.com\n##.ad\n/re[a-z]/\n||x.com^$popup\n||Y.com/Path$match-case\n", 1);
+        assert_eq!(c.rules.len(), 4, "{:?}", c.rules);
+        assert_eq!(c.skipped, 2);
+        let r = &c.rules;
+        assert_eq!(r[0]["id"], 1);
+        assert_eq!(r[0]["condition"]["urlFilter"], "||ads.example.com^");
+        assert!(r[0]["condition"]["resourceTypes"].as_array().unwrap().iter().any(|t| t == "main_frame"));
+        assert_eq!(r[1]["action"]["type"], "allow");
+        assert_eq!(r[1]["condition"]["resourceTypes"], json!(["script"]));
+        assert_eq!(r[2]["condition"]["domainType"], "thirdParty");
+        assert_eq!(r[2]["condition"]["initiatorDomains"], json!(["a.com"]));
+        assert_eq!(r[2]["condition"]["excludedInitiatorDomains"], json!(["b.a.com"]));
+        assert_eq!(r[3]["condition"]["urlFilter"], "||Y.com/Path");
+        assert_eq!(r[3]["condition"]["isUrlFilterCaseSensitive"], true);
+    }
+
+    #[test]
+    fn webkit_rules_to_dnr() {
+        let wk = json!([
+            { "trigger": { "url-filter": "^[^:]+://+([^:/]+\\.)?google-analytics\\.com[:/]", "load-type": ["third-party"] }, "action": { "type": "block" } },
+            { "trigger": { "url-filter": "/ads/[0-9]+", "resource-type": ["image", "raw"] }, "action": { "type": "block" } },
+            { "trigger": { "url-filter": "x" }, "action": { "type": "ignore-previous-rules" } }
+        ]);
+        let d = webkit_to_dnr(&wk, 10);
+        assert_eq!(d.len(), 2);
+        assert_eq!(d[0]["id"], 10);
+        assert_eq!(d[0]["condition"]["requestDomains"], json!(["google-analytics.com"]));
+        assert_eq!(d[0]["condition"]["domainType"], "thirdParty");
+        assert_eq!(d[1]["condition"]["regexFilter"], "/ads/[0-9]+");
+        assert_eq!(d[1]["condition"]["resourceTypes"], json!(["image", "xmlhttprequest"]));
     }
 }

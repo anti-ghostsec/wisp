@@ -1,0 +1,9 @@
+local.properties
+.gradle/
+build/
+app/build/
+app/src/main/jniLibs/
+app/src/main/assets/extensions/
+app/src/main/assets/plugins/
+app/src/main/java/uniffi/
+rust/target/
