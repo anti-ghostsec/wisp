@@ -12,8 +12,8 @@ mod state;
 mod sync;
 mod tooltip;
 mod vault;
-mod adblock;
 mod bigcopy;
+mod runtime;
 
 use browser::{BrowserWindow, Shared};
 use gtk::prelude::*;
@@ -45,6 +45,13 @@ fn main() -> glib::ExitCode {
         return glib::ExitCode::SUCCESS;
     }
 
+    // wisp-core: its folders, and GLib's main loop and libsoup to run on.
+    config::set_dirs(config::Dirs {
+        config: glib::user_config_dir().join(config::APP_NAME),
+        data: glib::user_data_dir().join(config::APP_NAME),
+        cache: glib::user_cache_dir().join(config::APP_NAME),
+    });
+    wisp_core::rt::install(Box::new(runtime::Glib::new()));
     let cfg = config::Config::load();
     configure_rendering(&cfg);
 

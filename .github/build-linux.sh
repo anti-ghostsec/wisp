@@ -58,8 +58,8 @@ if ! command -v cargo >/dev/null 2>&1; then
     . "$HOME/.cargo/env"
 fi
 if [ "${WISP_CHECK:-}" = 1 ]; then
-    cargo clippy --release --locked --all-targets --manifest-path "$here/Cargo.toml" -- -D warnings
-    cargo test --release --locked --manifest-path "$here/Cargo.toml"
+    cargo clippy --release --locked --workspace --all-targets --manifest-path "$here/Cargo.toml" -- -D warnings
+    cargo test --release --locked --workspace --manifest-path "$here/Cargo.toml"
     python3 -I "$here/tests/vidgrab_host.py"
 fi
 cargo build --release --locked --manifest-path "$here/Cargo.toml"

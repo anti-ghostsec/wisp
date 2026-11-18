@@ -1114,7 +1114,23 @@ dependencies = [
  "serde_json",
  "sha2",
  "webkit6",
+ "wisp-core",
  "x11rb",
+]
+
+[[package]]
+name = "wisp-core"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "argon2",
+ "base64",
+ "futures-channel",
+ "getrandom",
+ "pbkdf2",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
