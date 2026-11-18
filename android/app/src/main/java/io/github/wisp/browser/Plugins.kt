@@ -26,7 +26,8 @@ import java.util.concurrent.Executors
  */
 object Plugins {
     private const val TAG = "wisp"
-    private val work = Executors.newSingleThreadExecutor()
+    // A thread per call in flight: one waiting on the sync service never holds up the others.
+    private val work = Executors.newCachedThreadPool()
     private val main = Handler(Looper.getMainLooper())
 
     /** What plugins can ask of the browser around them. */

@@ -239,30 +239,46 @@ object Engine {
         config = JSONObject(core.configJson())
     }
 
-    /** wisp-core's HTTP (sync), through Gecko's network: the same route as pages. */
+    private val main = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /**
+     * wisp-core's HTTP (sync), through Gecko's network: the same route as
+     * pages, Orbot included. Called on the core's thread, it hands the
+     * request to the UI thread (GeckoView's results need a thread with a
+     * looper) and returns at once; the core always gets an answer, within
+     * 30 seconds at the most.
+     */
     private fun fetch(id: ULong, method: String, url: String, body: String?) {
-        val request = WebRequest.Builder(url).method(method).apply {
-            header("User-Agent", "wisp")
-            if (body != null) {
-                header("Content-Type", "application/json")
-                body(body)
+        val answered = java.util.concurrent.atomic.AtomicBoolean(false)
+        fun done(status: Int, bytes: ByteArray, error: String?) {
+            if (answered.compareAndSet(false, true)) core.httpDone(id, status.toUShort(), bytes, error)
+        }
+        main.postDelayed({ done(0, ByteArray(0), "the sync service didn't answer in 30 seconds") }, 30_000)
+        main.post {
+            try {
+                val request = WebRequest.Builder(url).method(method).apply {
+                    header("User-Agent", "wisp")
+                    if (body != null) {
+                        header("Content-Type", "application/json")
+                        body(body)
+                    }
+                    cacheMode(WebRequest.CACHE_MODE_NO_STORE)
+                }.build()
+                web.fetch(request, GeckoWebExecutor.FETCH_FLAGS_ANONYMOUS or GeckoWebExecutor.FETCH_FLAGS_PRIVATE).accept({ response ->
+                    if (response == null) return@accept done(0, ByteArray(0), "no response")
+                    io.execute {
+                        try {
+                            response.setReadTimeoutMillis(20_000)
+                            val bytes = response.body?.use { it.readBytes() } ?: ByteArray(0)
+                            done(response.statusCode, bytes, null)
+                        } catch (e: Exception) {
+                            done(0, ByteArray(0), e.message ?: "read failed")
+                        }
+                    }
+                }, { e -> done(0, ByteArray(0), e?.message ?: "request failed") })
+            } catch (e: Exception) {
+                done(0, ByteArray(0), e.message ?: "request failed")
             }
-            cacheMode(WebRequest.CACHE_MODE_NO_STORE)
-        }.build()
-        web.fetch(request, GeckoWebExecutor.FETCH_FLAGS_ANONYMOUS or GeckoWebExecutor.FETCH_FLAGS_PRIVATE).accept({ response ->
-            if (response == null) {
-                core.httpDone(id, 0u, ByteArray(0), "no response")
-                return@accept
-            }
-            io.execute {
-                val bytes = try {
-                    response.body?.use { it.readBytes() } ?: ByteArray(0)
-                } catch (e: Exception) {
-                    core.httpDone(id, 0u, ByteArray(0), e.message ?: "read failed")
-                    return@execute
-                }
-                core.httpDone(id, response.statusCode.toUShort(), bytes, null)
-            }
-        }, { e -> core.httpDone(id, 0u, ByteArray(0), e?.message ?: "request failed") })
+        }
     }
 }

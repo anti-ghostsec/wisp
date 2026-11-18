@@ -110,4 +110,19 @@ class Prompts(private val activity: MainActivity, private val tab: Tab) : Prompt
             .show()
         return result
     }
+
+    override fun onFilePrompt(session: GeckoSession, prompt: PromptDelegate.FilePrompt): GeckoResult<PromptResponse> {
+        val result = GeckoResult<PromptResponse>()
+        val multiple = prompt.type == PromptDelegate.FilePrompt.Type.MULTIPLE
+        activity.chooseFiles(prompt.mimeTypes, multiple) { uris ->
+            result.complete(
+                when {
+                    uris.isNullOrEmpty() -> prompt.dismiss()
+                    multiple -> prompt.confirm(activity, uris.toTypedArray())
+                    else -> prompt.confirm(activity, uris[0])
+                },
+            )
+        }
+        return result
+    }
 }

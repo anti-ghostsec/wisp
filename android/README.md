@@ -94,8 +94,9 @@ can't run one.
 
 ## Not yet
 
-- File uploads (`<input type=file>`), date pickers and colour pickers in pages.
+- Date and colour pickers in pages.
 - Downloading filter-list updates while the app runs (they come with each build).
-- The sync account dialog (bookmarks and passwords sync once an account is
-  set up; one is created on first save, as on desktop).
 - A start page: new tabs are blank, with the address bar ready.
+
+☰ → **Sync account…** takes your own sync ID and password (the same as on your
+other devices) or makes a new account, as on desktop.

@@ -55,6 +55,33 @@ pub trait Host: Send + std::marker::Sync {
     fn http(&self, id: u64, method: String, url: String, body: Option<String>);
 }
 
+/// `url` without tracking parameters, if it had any. A plain function, not a
+/// call to the core's thread: the UI thread asks it for every page loaded,
+/// and must never wait for the core (which may be busy syncing).
+#[uniffi::export]
+pub fn strip_tracking(url: String) -> Option<String> {
+    privacy::strip_params(&url)
+}
+
+/// What the user typed, as an address to load (`search_url` from the settings).
+#[uniffi::export]
+pub fn resolve_address(text: String, search_url: String) -> String {
+    address::resolve_input(&text, &search_url)
+}
+
+/// The sync service Wisp uses unless told otherwise.
+#[uniffi::export]
+pub fn default_sync_service() -> String {
+    wisp_core::sync::DEFAULT_SERVICE.to_string()
+}
+
+#[derive(uniffi::Record)]
+pub struct SyncAccount {
+    pub service: String,
+    pub id: String,
+    pub password: String,
+}
+
 #[derive(uniffi::Record)]
 pub struct VaultStatus {
     /// Set up (with a password or without).
@@ -445,6 +472,33 @@ impl Core {
             }
         })?
         .map_err(WispError::from)
+    }
+
+    /// The sync login (kept in the vault); None while locked or not set up.
+    pub fn sync_account(&self) -> Result<Option<SyncAccount>, WispError> {
+        self.run(|s| s.api.sync.account().map(|a| SyncAccount { service: a.service, id: a.id, password: a.password }))
+    }
+
+    /// Use an existing sync ID and password, after checking the password
+    /// opens what's stored there. Waits for the network: call it off the UI thread.
+    pub fn sync_use_account(&self, service: String, id: String, password: String) -> Result<(), WispError> {
+        self.run_async(move |s| async move {
+            let account = wisp_core::sync::Account { service: service.trim().to_string(), id: id.trim().to_string(), password };
+            s.api.sync.use_account(account).await
+        })?
+        .map_err(WispError::from)
+    }
+
+    /// A new sync ID with a random password on `service`.
+    pub fn sync_create_account(&self, service: String) -> Result<SyncAccount, WispError> {
+        self.run_async(move |s| async move { s.api.sync.create_account(service.trim()).await })?
+            .map(|a| SyncAccount { service: a.service, id: a.id, password: a.password })
+            .map_err(WispError::from)
+    }
+
+    /// Writes not yet uploaded to the sync service.
+    pub fn sync_pending(&self) -> Result<u32, WispError> {
+        self.run(|s| s.api.sync.pending() as u32)
     }
 
     /// Start loading bookmarks and logins from the sync service, so the

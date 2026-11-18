@@ -52,6 +52,8 @@ import java.text.DateFormat
 import java.util.Date
 import java.util.concurrent.Executors
 
+private const val PICK_FILES = 1
+
 class MainActivity : Activity(), Plugins.Ui {
     private lateinit var gecko: GeckoView
     private lateinit var address: EditText
@@ -297,7 +299,7 @@ class MainActivity : Activity(), Plugins.Ui {
         if (t.isEmpty()) return
         (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(address.windowToken, 0)
         address.clearFocus()
-        val url = if (typed) Engine.core.resolveInput(t) else t
+        val url = if (typed) uniffi.wisp_ffi.resolveAddress(t, Engine.config.optString("search_url")) else t
         when (url) {
             "wisp:history" -> return showHistory()
             "wisp:start" -> return go(home())
@@ -330,7 +332,7 @@ class MainActivity : Activity(), Plugins.Ui {
                     return GeckoResult.fromValue(AllowOrDeny.DENY)
                 }
                 // Tracking parameters off before anything is sent.
-                val clean = runCatching { Engine.core.cleanUrl(uri) }.getOrNull()
+                val clean = if (Engine.config.optBoolean("strip_tracking_params", true)) uniffi.wisp_ffi.stripTracking(uri) else null
                 if (clean != null && clean != uri) {
                     session.loadUri(clean)
                     return GeckoResult.fromValue(AllowOrDeny.DENY)
@@ -524,6 +526,7 @@ class MainActivity : Activity(), Plugins.Ui {
         add("History") { showHistory() }
         add("Settings") { showSettings() }
         add("Plugins") { showPlugins() }
+        add("Sync account…") { showSync() }
         add("Wisp password") { changePassword() }
         add("Close all tabs") {
             Tabs.list.toList().forEach { it.close() }
@@ -666,6 +669,130 @@ class MainActivity : Activity(), Plugins.Ui {
             }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    // ---- the sync account ----
+
+    /**
+     * The xBrowserSync account bookmarks and passwords sync with, as on
+     * desktop (☰ → Sync account…): the same ID and password on each device
+     * share them.
+     */
+    private fun showSync() {
+        if (!Engine.core.vaultStatus().unlocked) {
+            Toast.makeText(this, "Unlock Wisp first: the sync login is kept in its vault", Toast.LENGTH_LONG).show()
+            return unlockVault { showSync() }
+        }
+        val account = runCatching { Engine.core.syncAccount() }.getOrNull()
+        fun field(hint: String, text: String) = EditText(this).apply {
+            this.hint = hint
+            setText(text)
+            setSingleLine()
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            imeOptions = EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+        }
+        val service = field("Service", account?.service ?: uniffi.wisp_ffi.defaultSyncService())
+        val id = field("Sync ID", account?.id ?: "")
+        val password = passwordField("Password").apply { setText(account?.password ?: "") }
+        val show = android.widget.CheckBox(this).apply {
+            text = "Show password"
+            setOnCheckedChangeListener { _, on ->
+                password.inputType = InputType.TYPE_CLASS_TEXT or
+                    (if (on) InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD else InputType.TYPE_TEXT_VARIATION_PASSWORD)
+            }
+        }
+        val status = TextView(this).apply {
+            text = if (account != null) "Connected." else
+                "Not set up yet. An account is made for you the first time you save a bookmark or password, or enter your own above."
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Sync account")
+            .setMessage("Bookmarks and passwords are encrypted on this phone and synced with xBrowserSync. Enter the same sync ID and password as on your other devices to share them.")
+            .setView(form(service, id, password, show, status))
+            .setPositiveButton("Use this account", null)
+            .setNeutralButton("Create new", null)
+            .setNegativeButton("Close", null)
+            .show()
+        val use = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+        val create = dialog.getButton(AlertDialog.BUTTON_NEUTRAL)
+        fun busy(on: Boolean) {
+            use.isEnabled = !on
+            create.isEnabled = !on
+        }
+        use.setOnClickListener {
+            val (svc, sid, pw) = Triple(service.text.toString().trim(), id.text.toString().trim(), password.text.toString())
+            if (sid.isEmpty() || pw.isEmpty()) {
+                status.text = "Enter a sync ID and password."
+                return@setOnClickListener
+            }
+            busy(true)
+            status.text = "Checking…"
+            work.execute {
+                val e = runCatching { Engine.core.syncUseAccount(svc, sid, pw) }.exceptionOrNull()
+                main.post {
+                    busy(false)
+                    status.text = if (e == null) "Connected. Bookmarks and passwords now sync with this account."
+                    else "Couldn't use this account: ${e.message}"
+                }
+            }
+        }
+        create.setOnClickListener {
+            busy(true)
+            status.text = "Creating account…"
+            val svc = service.text.toString().trim()
+            work.execute {
+                val r = runCatching { Engine.core.syncCreateAccount(svc) }
+                main.post {
+                    busy(false)
+                    r.onSuccess {
+                        id.setText(it.id)
+                        password.setText(it.password)
+                        status.text = "New account created. Keep the ID and password to sync your other devices."
+                    }.onFailure { status.text = "Couldn't create an account: ${it.message}" }
+                }
+            }
+        }
+    }
+
+    // ---- file pickers ----
+
+    private var pickFile: ((List<Uri>?) -> Unit)? = null
+
+    /** Choose files for a page (`<input type=file>`, a plugin's Import…). */
+    fun chooseFiles(mimeTypes: Array<String>?, multiple: Boolean, done: (List<Uri>?) -> Unit) {
+        pickFile?.invoke(null)
+        pickFile = done
+        // Android's names for files don't always match a page's list (a CSV
+        // can be text/comma-separated-values): only pictures, video and sound
+        // narrow the picker; otherwise every file is offered, and the page
+        // checks what it gets.
+        val media = mimeTypes.orEmpty().filter { it.contains('/') }
+        val types = if (media.isNotEmpty() && media.all { it.startsWith("image/") || it.startsWith("video/") || it.startsWith("audio/") }) media else emptyList()
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).apply {
+            type = if (types.size == 1) types[0] else "*/*"
+            if (types.size > 1) putExtra(Intent.EXTRA_MIME_TYPES, types.toTypedArray())
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multiple)
+        }
+        try {
+            @Suppress("DEPRECATION")
+            startActivityForResult(intent, PICK_FILES)
+        } catch (e: ActivityNotFoundException) {
+            pickFile = null
+            done(null)
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        @Suppress("DEPRECATION")
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != PICK_FILES) return
+        val done = pickFile ?: return
+        pickFile = null
+        if (resultCode != RESULT_OK || data == null) return done(null)
+        val clip = data.clipData
+        val uris = if (clip != null) (0 until clip.itemCount).map { clip.getItemAt(it).uri } else listOfNotNull(data.data)
+        done(uris.ifEmpty { null })
     }
 
     // ---- downloads ----
