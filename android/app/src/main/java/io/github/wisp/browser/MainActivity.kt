@@ -53,6 +53,8 @@ import java.util.Date
 import java.util.concurrent.Executors
 
 private const val PICK_FILES = 1
+/** A new tab to type an address or search into (the search bar widget). */
+private const val TYPE = "wisp:type"
 
 class MainActivity : Activity(), Plugins.Ui {
     private lateinit var gecko: GeckoView
@@ -76,7 +78,7 @@ class MainActivity : Activity(), Plugins.Ui {
         Engine.start(this)
         Plugins.ui = this
         Tabs.delegates = { tab, session -> connect(tab, session) }
-        intent?.takeIf { it.action == Intent.ACTION_VIEW }?.dataString?.let { waiting += it }
+        intent?.let { linkOf(it) }?.let { waiting += it }
         askVault { Engine.installExtensions(this) { onReady() } }
     }
 
@@ -88,7 +90,7 @@ class MainActivity : Activity(), Plugins.Ui {
             val saved = runCatching { Engine.core.loadTabs() }.getOrDefault(emptyList())
             saved.forEach { Tabs.list += Tab(it.url, it.title) }
         }
-        waiting.forEach { openTab(it, true) }
+        waiting.forEach { open(it) }
         waiting.clear()
         if (Tabs.list.isEmpty()) openTab(home(), true) else show(Tabs.current ?: Tabs.list.last())
         if (Engine.torEnabled(this)) checkOrbot()
@@ -97,9 +99,33 @@ class MainActivity : Activity(), Plugins.Ui {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        if (intent.action != Intent.ACTION_VIEW) return
-        val url = intent.dataString ?: return
-        if (ready) openTab(url, true) else waiting += url
+        val link = linkOf(intent) ?: return
+        if (ready) open(link) else waiting += link
+    }
+
+    /**
+     * What another app (or the home screen's search bar) handed Wisp: a link
+     * to open, a search, or [TYPE]: a new tab with the keyboard up.
+     */
+    private fun linkOf(intent: Intent): String? = when (intent.action) {
+        Intent.ACTION_VIEW -> intent.dataString
+        SearchWidget.ACTION -> TYPE
+        Intent.ACTION_WEB_SEARCH, Intent.ACTION_SEARCH ->
+            intent.getStringExtra(android.app.SearchManager.QUERY)?.trim()?.takeIf { it.isNotEmpty() }
+                ?.let { uniffi.wisp_ffi.resolveAddress(it, Engine.config.optString("search_url")) } ?: TYPE
+        else -> null
+    }
+
+    private fun open(link: String) {
+        if (link != TYPE) return openTab(link, true)
+        // A blank tab to type into, unless the one showing is blank already.
+        val tab = Tabs.current
+        if (tab == null || tab.url != "about:blank") openTab("about:blank", true) else show(tab)
+        address.setText("")
+        address.requestFocus()
+        address.post {
+            (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showSoftInput(address, InputMethodManager.SHOW_IMPLICIT)
+        }
     }
 
     override fun onPause() {
@@ -527,6 +553,12 @@ class MainActivity : Activity(), Plugins.Ui {
         add("Settings") { showSettings() }
         add("Plugins") { showPlugins() }
         add("Sync account…") { showSync() }
+        val widgets = getSystemService(android.appwidget.AppWidgetManager::class.java)
+        if (widgets?.isRequestPinAppWidgetSupported == true) {
+            add("Add search bar to home screen") {
+                widgets.requestPinAppWidget(android.content.ComponentName(this, SearchWidget::class.java), null, null)
+            }
+        }
         add("Wisp password") { changePassword() }
         add("Close all tabs") {
             Tabs.list.toList().forEach { it.close() }

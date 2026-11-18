@@ -78,6 +78,14 @@ security fixes reach Wisp, so move to each one.
 - **No backups**: nothing of Wisp's goes into Android's cloud backups or
   device transfers.
 
+## Search bar on the home screen
+
+Wisp has a home-screen widget: a search bar you can stretch from half the
+screen to all of it. Touching it opens a new tab with the address bar ready
+and the keyboard up (widgets can't take typing themselves). Add it from the
+home screen's widget list, or ☰ → **Add search bar to home screen**. Searches
+other apps hand to the browser ("Search the web") open in Wisp too.
+
 ## Plugins
 
 Each plugin in `plugins/` becomes a built-in extension (Manifest V3) when the
