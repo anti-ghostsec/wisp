@@ -19,8 +19,10 @@ android {
         applicationId = "io.github.wisp.browser"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        // Each build must count higher than the one it updates: the release
+        // workflow passes the number of commits (-PversionCode=...).
+        versionCode = (findProperty("versionCode") as String?)?.toInt() ?: 1
+        versionName = (findProperty("versionName") as String?) ?: "0.1.0"
         ndk { abiFilters += abi }
     }
 
@@ -34,7 +36,9 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     packaging {
-        jniLibs.useLegacyPackaging = false
+        // Compressed in the APK (Android unpacks them when installing): a
+        // download of ~95 MB instead of ~200.
+        jniLibs.useLegacyPackaging = true
     }
 }
 

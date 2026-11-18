@@ -26,9 +26,15 @@ android/build-android.sh arm64-v8a              # phones; x86_64 for the emulato
 ```
 
 The APK is in `android/app/build/outputs/apk/debug/`. `build-android.sh ABI
-release` makes an unsigned release build: sign it with your own key
-(`apksigner sign --ks your.keystore ...`); keep the keystore out of the
-repository. An app can only be updated with the key it was installed with.
+release` makes an unsigned release build, for signing with `apksigner`.
+
+Every push to `main` also puts a signed `wisp-android-arm64.apk` into the
+release (the `android` job in `.github/workflows/release.yml`), numbered by
+commit count so each installs over the one before. It's signed with Wisp's
+Android key, kept out of the repository (GitHub secrets `ANDROID_KEYSTORE`
+and `ANDROID_KEYSTORE_PASSWORD`); the workflow checks the signature against
+`android/release-cert.sha256`. Android only updates an app with the key it was
+installed with: lose the key and the next APK can't replace the installed one.
 
 GeckoView comes from Mozilla's Maven repository, one package per CPU type
 (about 90 MB). Its version is in `app/build.gradle.kts`; Mozilla publishes a

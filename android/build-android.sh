@@ -60,5 +60,7 @@ fetch badware https://ublockorigin.github.io/uAssets/filters/badware.txt
 
 echo "build-android: app"
 task=assemble$(printf %s "$kind" | cut -c1 | tr a-z A-Z)$(printf %s "$kind" | cut -c2-)
-"$here/gradlew" -p "$here" --no-daemon -q "$task" -Pabi="$abi"
+# WISP_VERSION_CODE / WISP_VERSION_NAME: what the release workflow numbers it.
+"$here/gradlew" -p "$here" --no-daemon -q "$task" -Pabi="$abi" \
+    ${WISP_VERSION_CODE:+-PversionCode="$WISP_VERSION_CODE"} ${WISP_VERSION_NAME:+-PversionName="$WISP_VERSION_NAME"}
 ls "$here"/app/build/outputs/apk/"$kind"/*.apk
