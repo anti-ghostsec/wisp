@@ -62,14 +62,22 @@ jobs:
             dist/wisp-linux-x86_64.tar.gz dist/wisp-linux-x86_64.tar.gz.sha256 \
             dist/wisp-linux-x86_64.tar.gz.minisig dist/wisp-commit
 
-  # Wisp for Android (arm64 phones), added to the same release once the Linux
-  # build is out: an Android build that fails never holds up FerroOS's updates.
+  # Wisp for Android, added to the same release once the Linux build is out:
+  # an Android build that fails never holds up FerroOS's updates. Phones run
+  # wisp-android-arm64.apk; wisp-android-x86_64.apk is for the Android
+  # emulator. Each is built on its own, so one failing doesn't hold up the other.
   # Signed with Wisp's Android key (secrets ANDROID_KEYSTORE, base64, and
   # ANDROID_KEYSTORE_PASSWORD), and checked against android/release-cert.sha256,
   # so each APK installs over the one before.
   android:
     needs: linux
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { abi: arm64-v8a, target: aarch64-linux-android, apk: wisp-android-arm64.apk }
+          - { abi: x86_64, target: x86_64-linux-android, apk: wisp-android-x86_64.apk }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -84,13 +92,14 @@ jobs:
           yes | "$sdk" --licenses >/dev/null || true
           "$sdk" --install "ndk;29.0.14206865" "platforms;android-37.2" "build-tools;36.0.0" >/dev/null
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/29.0.14206865"
-          rustup target add aarch64-linux-android
+          rustup target add "${{ matrix.target }}"
           cargo install cargo-ndk --version 4.1.2 --locked
           WISP_VERSION_CODE=$(git rev-list --count "$GITHUB_SHA") WISP_VERSION_NAME="0.1.0-$(echo "$GITHUB_SHA" | cut -c1-7)" \
-            android/build-android.sh arm64-v8a release
+            android/build-android.sh "${{ matrix.abi }}" release
 
       - name: Sign
         env:
+          APK: ${{ matrix.apk }}
           ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
@@ -103,15 +112,16 @@ jobs:
           printf '%s' "$ANDROID_KEYSTORE" | base64 -d >"$key"
           WISP_KS_PASS=$(printf '%s' "$ANDROID_KEYSTORE_PASSWORD" | tr -d '\r\n') "$tools/apksigner" sign \
             --ks "$key" --ks-key-alias wisp --ks-pass env:WISP_KS_PASS --key-pass env:WISP_KS_PASS \
-            --out wisp-android-arm64.apk android/app/build/outputs/apk/release/app-release-unsigned.apk
+            --out "$APK" android/app/build/outputs/apk/release/app-release-unsigned.apk
           # Signed with Wisp's key, not some other one.
-          got=$("$tools/apksigner" verify --print-certs wisp-android-arm64.apk | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+          got=$("$tools/apksigner" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
           [ "$got" = "$(cat android/release-cert.sha256)" ] || { echo "signed with $got, not Wisp's key" >&2; exit 1; }
-          sha256sum wisp-android-arm64.apk >wisp-android-arm64.apk.sha256
+          sha256sum "$APK" >"$APK.sha256"
 
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          APK: ${{ matrix.apk }}
         run: |
           short=$(echo "$GITHUB_SHA" | cut -c1-7)
-          gh release upload "build-$short" wisp-android-arm64.apk wisp-android-arm64.apk.sha256
+          gh release upload "build-$short" "$APK" "$APK.sha256"

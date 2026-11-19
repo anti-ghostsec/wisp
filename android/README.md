@@ -28,9 +28,11 @@ android/build-android.sh arm64-v8a              # phones; x86_64 for the emulato
 The APK is in `android/app/build/outputs/apk/debug/`. `build-android.sh ABI
 release` makes an unsigned release build, for signing with `apksigner`.
 
-Every push to `main` also puts a signed `wisp-android-arm64.apk` into the
-release (the `android` job in `.github/workflows/release.yml`), numbered by
-commit count so each installs over the one before. It's signed with Wisp's
+Every push to `main` also puts two signed APKs into the release (the
+`android` job in `.github/workflows/release.yml`), numbered by commit count so
+each installs over the one before: `wisp-android-arm64.apk` for phones, and
+`wisp-android-x86_64.apk` for the Android emulator (an x86-64 system image),
+each with its `.sha256`. It's signed with Wisp's
 Android key, kept out of the repository (GitHub secrets `ANDROID_KEYSTORE`
 and `ANDROID_KEYSTORE_PASSWORD`); the workflow checks the signature against
 `android/release-cert.sha256`. Android only updates an app with the key it was
