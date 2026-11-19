@@ -100,13 +100,24 @@ security fixes reach Wisp, so move to each one.
 - **No backups**: nothing of Wisp's goes into Android's cloud backups or
   device transfers.
 
-## Search bar on the home screen
+## Downloads
 
-Wisp has a home-screen widget: a search bar you can stretch from half the
-screen to all of it. Touching it opens a new tab with the address bar ready
-and the keyboard up (widgets can't take typing themselves). Add it from the
-home screen's widget list, or ☰ → **Add search bar to home screen**. Searches
-other apps hand to the browser ("Search the web") open in Wisp too.
+Files are saved to **Download/Wisp** on the phone, where your file manager and
+other apps see them (Android 8 and 9 keep them in Wisp's own folder). While
+one downloads, a notification shows its progress (Android 13 and later ask
+once whether Wisp may show notifications); on a locked screen it doesn't name
+the file. ☰ → **Downloads** lists what's downloading, with Cancel, and what's
+finished, to open, share or delete. *Wipe everything* leaves downloaded files
+where they are: delete them in Downloads first.
+
+## The ☰ menu
+
+Every day: back and forward, reload, new tab, bookmarks and passwords,
+downloads, history. **Privacy & security**: the security level, the route,
+the Wisp password and *Wipe everything*. **More**: the element blocker,
+settings, plugins, the sync account and *Close all tabs*.
+
+Searches other apps hand to a browser ("Search the web") open in Wisp.
 
 ## Plugins
 

@@ -133,6 +133,8 @@ pub struct PluginInfo {
     pub permissions: Vec<String>,
     /// "dark" for a plugin that asks pages for their dark theme.
     pub color_scheme: Option<String>,
+    /// Its actions sit in desktop Wisp's toolbar (else only in its ☰ menu).
+    pub toolbar: bool,
 }
 
 /// What lives on the core's thread.
@@ -446,6 +448,7 @@ impl Core {
                             .collect(),
                         permissions: m.permissions.clone(),
                         color_scheme: m.color_scheme.clone(),
+                        toolbar: m.toolbar,
                     }
                 })
                 .collect()

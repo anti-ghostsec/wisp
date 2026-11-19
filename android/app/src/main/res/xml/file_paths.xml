@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Downloads on Android 8 and 9: Wisp's own Download folder. -->
+<paths>
+    <external-files-path name="downloads" path="Download/Wisp/" />
+</paths>

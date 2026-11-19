@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="widget_hint">Search or address</string>
-    <string name="widget_description">Search the web with Wisp</string>
-    <string name="widget_name">Wisp search</string>
-</resources>

@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- A download's progress shows in a notification. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Only to see whether Orbot is installed, to start it. -->
     <queries>
         <package android:name="org.torproject.android" />
@@ -36,17 +38,20 @@
                 <data android:scheme="https" />
             </intent-filter>
         </activity>
-        <!-- The home screen's search bar. -->
-        <receiver
-            android:name=".SearchWidget"
-            android:exported="true"
-            android:label="@string/widget_name">
-            <intent-filter>
-                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
-            </intent-filter>
+        <activity
+            android:name=".DownloadsActivity"
+            android:exported="false"
+            android:label="Downloads"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <!-- Sharing downloads on Android 8 and 9, where they're kept in Wisp's own folder. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
             <meta-data
-                android:name="android.appwidget.provider"
-                android:resource="@xml/widget_search_info" />
-        </receiver>
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

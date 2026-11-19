@@ -54,7 +54,7 @@ import java.util.concurrent.Executors
 
 private const val PICK_FILES = 1
 private const val RELOCK_AFTER_MS = 5 * 60_000L
-/** A new tab to type an address or search into (the search bar widget). */
+/** A new tab to type an address or search into (a search with nothing typed yet). */
 private const val TYPE = "wisp:type"
 
 class MainActivity : Activity(), Plugins.Ui {
@@ -106,12 +106,11 @@ class MainActivity : Activity(), Plugins.Ui {
     }
 
     /**
-     * What another app (or the home screen's search bar) handed Wisp: a link
+     * What another app handed Wisp: a link
      * to open, a search, or [TYPE]: a new tab with the keyboard up.
      */
     private fun linkOf(intent: Intent): String? = when (intent.action) {
         Intent.ACTION_VIEW -> intent.dataString
-        SearchWidget.ACTION -> TYPE
         Intent.ACTION_WEB_SEARCH, Intent.ACTION_SEARCH ->
             intent.getStringExtra(android.app.SearchManager.QUERY)?.trim()?.takeIf { it.isNotEmpty() }
                 ?.let { uniffi.wisp_ffi.resolveAddress(it, Engine.config.optString("search_url")) } ?: TYPE
@@ -550,43 +549,54 @@ class MainActivity : Activity(), Plugins.Ui {
 
     // ---- the ☰ menu ----
 
+    /**
+     * The ☰ menu: what's used every day at the top; privacy and security
+     * settings, and everything else, in a submenu each.
+     */
     private fun showMenu(anchor: View) {
         val popup = PopupMenu(this, anchor)
         val actions = mutableMapOf<Int, () -> Unit>()
         var next = 1
-        fun add(label: String, run: () -> Unit) {
+        fun add(menu: android.view.Menu, label: String, run: () -> Unit) {
             actions[next] = run
-            popup.menu.add(0, next++, 0, label)
+            menu.add(0, next++, 0, label)
         }
+        val top = popup.menu
         val tab = Tabs.current
-        if (tab?.canGoForward == true) add("Forward") { tab.session.goForward() }
-        add("Reload") { tab?.session?.reload() }
-        add("New tab") { openTab(home(), true) }
-        for (p in Engine.plugins.filter { it.enabled && Engine.extensions.containsKey(it.id) }) {
-            for (a in p.actions) add(a.label) { runAction(p.id, a.id, a.page) }
+        if (tab?.canGoForward == true) add(top, "Forward") { tab.session.goForward() }
+        add(top, "Reload") { tab?.session?.reload() }
+        add(top, "New tab") { openTab(home(), true) }
+        val plugins = Engine.plugins.filter { it.enabled && Engine.extensions.containsKey(it.id) }
+        // Plugins that sit in desktop Wisp's toolbar (bookmarks, passwords)
+        // are at the top; the ones kept in its ☰ menu go under More.
+        for (p in plugins.filter { it.toolbar }) {
+            for (a in p.actions) add(top, a.label) { runAction(p.id, a.id, a.page) }
         }
-        add("History") { showHistory() }
-        add("Settings") { showSettings() }
-        add("Security level: ${levelName(Engine.level(this))}") { showLevel() }
-        add("Route: ${routeName(Engine.route(this))}") { showRoute() }
-        add("Plugins") { showPlugins() }
-        add("Sync account…") { showSync() }
-        val widgets = getSystemService(android.appwidget.AppWidgetManager::class.java)
-        if (widgets?.isRequestPinAppWidgetSupported == true) {
-            add("Add search bar to home screen") {
-                widgets.requestPinAppWidget(android.content.ComponentName(this, SearchWidget::class.java), null, null)
-            }
+        val running = Downloads.jobs.count { it.state == Downloads.State.RUNNING }
+        add(top, if (running > 0) "Downloads ($running)" else "Downloads") { startActivity(Intent(this, DownloadsActivity::class.java)) }
+        add(top, "History") { showHistory() }
+
+        val privacy = top.addSubMenu("Privacy & security")
+        add(privacy, "Security level: ${levelName(Engine.level(this))}") { showLevel() }
+        add(privacy, "Route: ${routeName(Engine.route(this))}") { showRoute() }
+        add(privacy, "Wisp password") { changePassword() }
+        add(privacy, "Wipe everything…") { askWipe() }
+
+        val more = top.addSubMenu("More")
+        for (p in plugins.filter { !it.toolbar }) {
+            for (a in p.actions) add(more, a.label) { runAction(p.id, a.id, a.page) }
         }
-        add("Wisp password") { changePassword() }
-        add("Wipe everything…") { askWipe() }
-        add("Close all tabs") {
+        add(more, "Settings") { showSettings() }
+        add(more, "Plugins") { showPlugins() }
+        add(more, "Sync account…") { showSync() }
+        add(more, "Close all tabs") {
             Tabs.list.toList().forEach { it.close() }
             Tabs.list.clear()
             Tabs.current = null
             gecko.releaseSession()
             openTab(home(), true)
         }
-        popup.setOnMenuItemClickListener { actions[it.itemId]?.invoke(); true }
+        popup.setOnMenuItemClickListener { item -> actions[item.itemId]?.let { it(); true } ?: false }
         popup.show()
     }
 
@@ -776,7 +786,7 @@ class MainActivity : Activity(), Plugins.Ui {
     private fun askWipe() {
         AlertDialog.Builder(this)
             .setTitle("Wipe everything?")
-            .setMessage("Every tab, your history, the vault with your saved passwords, bookmarks and sync login, cookies, site data and settings are deleted from this phone, and Wisp closes. This can't be undone. What's on your sync service stays there.")
+            .setMessage("Every tab, your history, the vault with your saved passwords, bookmarks and sync login, cookies, site data and settings are deleted from this phone, and Wisp closes. This can't be undone. What's on your sync service stays there, and so do the files in ${Environment.DIRECTORY_DOWNLOADS}/${Downloads.FOLDER}: delete those in Downloads first if you want them gone.")
             .setPositiveButton("Wipe") { _, _ ->
                 (getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager).clearApplicationUserData()
             }
@@ -960,37 +970,24 @@ class MainActivity : Activity(), Plugins.Ui {
         val size = response.headers["Content-Length"]?.toLongOrNull()?.let { " (${android.text.format.Formatter.formatShortFileSize(this, it)})" } ?: ""
         AlertDialog.Builder(this)
             .setTitle("Download")
-            .setMessage("Save $name$size to Downloads?\n\nFrom ${Uri.parse(response.uri).host}")
+            .setMessage("Save $name$size to ${Environment.DIRECTORY_DOWNLOADS}/${Downloads.FOLDER}?\n\nFrom ${Uri.parse(response.uri).host}")
             .setPositiveButton("Save") { _, _ -> save(response, name) }
             .setNegativeButton("Cancel") { _, _ -> work.execute { runCatching { response.body?.close() } } }
             .show()
     }
 
     private fun save(response: WebResponse, name: String) {
-        val mime = response.headers["Content-Type"]?.substringBefore(';') ?: "application/octet-stream"
-        work.execute {
-            val result = runCatching {
-                val input = response.body ?: error("nothing to save")
-                if (Build.VERSION.SDK_INT >= 29) {
-                    val values = ContentValues().apply {
-                        put(MediaStore.Downloads.DISPLAY_NAME, name)
-                        put(MediaStore.Downloads.MIME_TYPE, mime)
-                        put(MediaStore.Downloads.IS_PENDING, 1)
-                    }
-                    val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("can't create the file")
-                    contentResolver.openOutputStream(uri)!!.use { out -> input.use { it.copyTo(out) } }
-                    values.clear()
-                    values.put(MediaStore.Downloads.IS_PENDING, 0)
-                    contentResolver.update(uri, values, null, null)
-                } else {
-                    val dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: filesDir
-                    File(dir, name).outputStream().use { out -> input.use { it.copyTo(out) } }
-                }
-            }
-            main.post {
-                Toast.makeText(this, result.fold({ "Saved $name" }, { "Download failed: ${it.message}" }), Toast.LENGTH_LONG).show()
-            }
+        // Android 13 and later ask before an app shows notifications: the
+        // download's progress shows in one (and in ☰ → Downloads either way).
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED &&
+            !prefs.getBoolean("asked_notifications", false)
+        ) {
+            prefs.edit().putBoolean("asked_notifications", true).apply()
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 2)
         }
+        Downloads.start(this, response, name)
+        Toast.makeText(this, "Downloading $name: see ☰ → Downloads", Toast.LENGTH_SHORT).show()
     }
 
     // ---- the vault ----
