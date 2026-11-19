@@ -32,3 +32,11 @@ codegen-units = 1
 # Symbols stay: the bindings are generated from the library's own metadata.
 strip = "debuginfo"
 opt-level = "s"
+
+# Debug info: file and line numbers for our code, none for dependencies,
+# or the build folder grows by tens of gigabytes.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
