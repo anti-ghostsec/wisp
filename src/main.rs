@@ -125,7 +125,11 @@ fn main() -> glib::ExitCode {
                 let (app2, open, waiting) = (app.clone(), open.clone(), waiting.clone());
                 vault::ask(app, None, kind, move |_| {
                     let uris = waiting.borrow_mut().take().unwrap_or_default();
-                    open(&app2, uris, true);
+                    // Closed with its X: Wisp quits, links and all ("Not
+                    // now" is how it opens locked).
+                    if !vault::closed() {
+                        open(&app2, uris, true);
+                    }
                     drop(hold);
                 });
             }

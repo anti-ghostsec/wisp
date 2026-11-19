@@ -12,6 +12,17 @@ use webkit6::glib;
 /// What `ask` calls when it's done.
 type Done = Box<dyn FnOnce(bool)>;
 
+thread_local! {
+    /// The last password window was closed with its X rather than answered.
+    static CLOSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the last password window was closed with its X (at start: the
+/// person wants Wisp gone, not opened locked), rather than answered.
+pub fn closed() -> bool {
+    CLOSED.get()
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum Ask {
     /// First start: choose a password (or none).
@@ -25,6 +36,7 @@ pub enum Ask {
 /// The vault's window. `done(true)` once the vault is open (set up, unlocked
 /// or changed), `done(false)` if put off; called once.
 pub fn ask(app: &gtk::Application, parent: Option<&gtk::Window>, kind: Ask, done: impl FnOnce(bool) + 'static) {
+    CLOSED.set(false);
     let vault = get();
     if vault.downgraded() {
         return warn_downgraded(app, parent, done);
@@ -47,8 +59,12 @@ pub fn ask(app: &gtk::Application, parent: Option<&gtk::Window>, kind: Ask, done
         }
     };
     {
-        let finish = finish.clone();
+        let (finish, done) = (finish.clone(), done.clone());
         window.connect_close_request(move |_| {
+            // Still waiting for an answer: closed with its X, not a button.
+            if done.borrow().is_some() {
+                CLOSED.set(true);
+            }
             finish(false);
             glib::Propagation::Proceed
         });
@@ -209,8 +225,12 @@ fn warn_downgraded(app: &gtk::Application, parent: Option<&gtk::Window>, done: i
         }
     };
     {
-        let finish = finish.clone();
+        let (finish, done) = (finish.clone(), done.clone());
         window.connect_close_request(move |_| {
+            // Still waiting for an answer: closed with its X, not a button.
+            if done.borrow().is_some() {
+                CLOSED.set(true);
+            }
             finish(false);
             glib::Propagation::Proceed
         });
