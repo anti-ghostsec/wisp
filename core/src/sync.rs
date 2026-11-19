@@ -156,6 +156,14 @@ impl Sync {
         Ok(())
     }
 
+    /// Forget what's held in memory (the bookmarks and logins, the derived
+    /// key) when the vault locks. Nothing on disk changes; it's read again
+    /// once the vault is open.
+    pub fn forget(&self) {
+        *self.state.borrow_mut() = None;
+        *self.key.borrow_mut() = None;
+    }
+
     fn set_account(&self, account: Account) -> Result<(), String> {
         vault::get().set_account(account)?;
         *self.state.borrow_mut() = None;

@@ -346,6 +346,23 @@ impl Core {
         self.run_async(move |_| async move { vault::get().set_password(password).await })?.map_err(WispError::from)
     }
 
+    /// Lock a password-protected vault again (Wisp was in the background
+    /// a while): history, plugin data and the synced bookmarks and logins
+    /// leave memory with its key, until it's unlocked. True if it locked
+    /// (false without a password: there's nothing to unlock with).
+    pub fn vault_lock(&self) -> Result<bool, WispError> {
+        self.run(|s| {
+            let v = vault::get();
+            if !v.protected() || !v.is_open() {
+                return false;
+            }
+            s.store.forget();
+            s.api.forget();
+            v.lock();
+            true
+        })
+    }
+
     pub fn vault_accept_downgrade(&self) -> Result<(), WispError> {
         self.run(|_| vault::get().accept_downgrade())
     }

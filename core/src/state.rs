@@ -122,6 +122,13 @@ impl Store {
         list
     }
 
+    /// Forget the history held in memory (the vault is locking); what's
+    /// saved stays, and is read again once the vault is open.
+    pub fn forget(&self) {
+        self.save_now();
+        *self.history.borrow_mut() = None;
+    }
+
     pub fn clear_history(&self) {
         *self.history.borrow_mut() = Some(Vec::new());
         let _ = fs::remove_file(history_path());

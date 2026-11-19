@@ -29,6 +29,8 @@ object Engine {
     const val PREFS = "wisp-android"
     /** Orbot's SOCKS port. */
     const val ORBOT_PORT = 9050
+    /** Where Gecko is sent while the built-in Tor connects: nothing listens there. */
+    private const val CLOSED_PORT = 9
 
     lateinit var runtime: GeckoRuntime
         private set
@@ -78,7 +80,7 @@ object Engine {
             .queryParameterStrippingPrivateBrowsingEnabled(cfg.optBoolean("strip_tracking_params", true))
             .build()
         val settings = GeckoRuntimeSettings.Builder()
-            .javaScriptEnabled(cfg.optBoolean("javascript", true))
+            .javaScriptEnabled(cfg.optBoolean("javascript", true) && level(app) != Level.SAFEST)
             .globalPrivacyControlEnabled(true)
             .loginAutofillEnabled(false)
             .remoteDebuggingEnabled(false)
@@ -89,6 +91,9 @@ object Engine {
             .preferredColorScheme(if (dark) GeckoRuntimeSettings.COLOR_SCHEME_DARK else GeckoRuntimeSettings.COLOR_SCHEME_SYSTEM)
             .contentBlocking(blocking)
             .isolatedProcessEnabled(true)
+            // Site isolation: each site in processes of its own, so a page
+            // that takes over its process still can't read another site's.
+            .fissionEnabled(true)
             .build()
         runtime = GeckoRuntime.create(app, settings)
         web = GeckoWebExecutor(runtime)
@@ -99,33 +104,77 @@ object Engine {
         if (cfg.optBoolean("block_third_party_cookies", true)) ContentBlocking.CookieBehavior.ACCEPT_FIRST_PARTY
         else ContentBlocking.CookieBehavior.ACCEPT_FIRST_PARTY_AND_ISOLATE_OTHERS
 
-    fun torEnabled(context: Context) =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("tor", false)
+    /** How pages reach the internet. */
+    enum class Route { DIRECT, TOR, ORBOT }
+
+    /** How much of the web Wisp turns off to make attacks harder. */
+    enum class Level { STANDARD, SAFER, SAFEST }
+
+    private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    fun route(context: Context): Route {
+        val p = prefs(context)
+        p.getString("route", null)?.let { name -> return Route.entries.find { it.name == name } ?: Route.DIRECT }
+        // Before the built-in Tor: a tick meant Orbot.
+        return if (p.getBoolean("tor", false)) Route.ORBOT else Route.DIRECT
+    }
+
+    fun setRoute(context: Context, route: Route) = prefs(context).edit().putString("route", route.name).remove("tor").apply()
+
+    /** Safer unless chosen otherwise: no JIT compilers, which most browser exploits go through. */
+    fun level(context: Context): Level =
+        prefs(context).getString("security_level", null)?.let { name -> Level.entries.find { it.name == name } } ?: Level.SAFER
+
+    fun setLevel(context: Context, level: Level) = prefs(context).edit().putString("security_level", level.name).apply()
+
+    /** JavaScript runs at all: the setting, and not at the Safest level. */
+    fun javascript(context: Context) = config.optBoolean("javascript", true) && level(context) != Level.SAFEST
 
     /**
-     * Gecko settings GeckoView has no call for: what desktop Wisp turns off
-     * in WebKit (WebGL, WebRTC, the JIT with Safer JavaScript), Gecko's own
-     * fingerprinting protection, and the route: straight out (your VPN, if
-     * one is on), or through Orbot's SOCKS port with names looked up there.
+     * Gecko settings GeckoView has no call for: what the security level
+     * turns off, what desktop Wisp turns off in WebKit (WebGL, WebRTC),
+     * Gecko's fingerprinting protection, and the route: straight out (your
+     * VPN, if one is on), or through Tor (built in or Orbot's) with names
+     * looked up there. On Tor, until it's connected, Gecko is pointed at a
+     * port nothing listens on: pages fail, they never go around it.
      */
     fun applyPrefs(context: Context): GeckoResult<Map<String, Boolean>> {
         val cfg = config
-        val tor = torEnabled(context)
-        val noJit = cfg.optBoolean("no_jit", false)
-        val webrtc = cfg.optBoolean("webrtc", false) && !tor
+        val route = route(context)
+        val level = level(context)
+        val tor = route != Route.DIRECT
+        val standard = level == Level.STANDARD
+        val noJit = !standard
+        val webrtc = cfg.optBoolean("webrtc", false) && !tor && standard
+        val webgl = cfg.optBoolean("webgl", false) && standard
+        val socksPort = when (route) {
+            Route.ORBOT -> ORBOT_PORT
+            Route.TOR -> Tor.port.takeIf { it > 0 } ?: CLOSED_PORT
+            Route.DIRECT -> ORBOT_PORT
+        }
         val user = GeckoPreferenceController.PREF_BRANCH_USER
         fun b(name: String, v: Boolean) = SetGeckoPreference.setBoolPref(name, v, user)
         fun i(name: String, v: Int) = SetGeckoPreference.setIntPref(name, v, user)
         fun s(name: String, v: String) = SetGeckoPreference.setStringPref(name, v, user)
         val prefs = listOf(
-            b("webgl.disabled", !cfg.optBoolean("webgl", false)),
+            b("webgl.disabled", !webgl),
             b("media.peerconnection.enabled", webrtc),
             b("media.navigator.enabled", webrtc),
+            // Safer and Safest: scripts run without the JIT compilers (and so
+            // without WebAssembly), which most browser exploits go through.
             b("javascript.options.ion", !noJit),
             b("javascript.options.baselinejit", !noJit),
             b("javascript.options.native_regexp", !noJit),
             b("javascript.options.wasm", !noJit),
-            b("javascript.options.asmjs", !noJit),
+            b("javascript.options.shared_memory", standard),
+            // Rarely used, often attacked: off at every level.
+            b("javascript.options.asmjs", false),
+            b("dom.webgpu.enabled", false),
+            b("gfx.font_rendering.graphite.enabled", false),
+            b("gfx.font_rendering.opentype_svg.enabled", false),
+            b("mathml.disabled", !standard),
+            // Safest: only the fonts on the phone.
+            b("gfx.downloadable_fonts.enabled", level != Level.SAFEST),
             b("privacy.fingerprintingProtection", true),
             b("privacy.fingerprintingProtection.pbmode", true),
             b("geo.enabled", false),
@@ -141,13 +190,14 @@ object Engine {
             // Proxy: 1 = the SOCKS settings below, 5 = the system's.
             i("network.proxy.type", if (tor) 1 else 5),
             s("network.proxy.socks", "127.0.0.1"),
-            i("network.proxy.socks_port", ORBOT_PORT),
+            i("network.proxy.socks_port", socksPort),
             i("network.proxy.socks_version", 5),
             b("network.proxy.socks_remote_dns", true),
-            // Orbot not running: fail, never go around it.
+            // Tor not there: fail, never go around it.
             b("network.proxy.failover_direct", !tor),
             i("network.trr.mode", if (tor) 5 else 0),
         )
+        runtime.settings.setJavaScriptEnabled(javascript(context))
         return GeckoPreferenceController.setGeckoPrefs(prefs).map { result ->
             val failed = result?.filterValues { !it }?.keys.orEmpty()
             if (failed.isNotEmpty()) Log.w(TAG, "prefs not set: $failed")

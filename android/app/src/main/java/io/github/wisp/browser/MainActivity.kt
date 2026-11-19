@@ -53,6 +53,7 @@ import java.util.Date
 import java.util.concurrent.Executors
 
 private const val PICK_FILES = 1
+private const val RELOCK_AFTER_MS = 5 * 60_000L
 /** A new tab to type an address or search into (the search bar widget). */
 private const val TYPE = "wisp:type"
 
@@ -74,6 +75,7 @@ class MainActivity : Activity(), Plugins.Ui {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        applyScreenPrivacy()
         buildUi()
         Engine.start(this)
         Plugins.ui = this
@@ -93,7 +95,7 @@ class MainActivity : Activity(), Plugins.Ui {
         waiting.forEach { open(it) }
         waiting.clear()
         if (Tabs.list.isEmpty()) openTab(home(), true) else show(Tabs.current ?: Tabs.list.last())
-        if (Engine.torEnabled(this)) checkOrbot()
+        startRoute()
         startSuspendTimer()
     }
 
@@ -128,8 +130,22 @@ class MainActivity : Activity(), Plugins.Ui {
         }
     }
 
+    /** When Wisp went to the background, for locking the vault again. */
+    private var hiddenAt = 0L
+
+    override fun onResume() {
+        super.onResume()
+        val away = hiddenAt.takeIf { it > 0 }?.let { System.currentTimeMillis() - it } ?: 0L
+        hiddenAt = 0L
+        // A Wisp password locks again after five minutes away.
+        if (ready && away > RELOCK_AFTER_MS && runCatching { Engine.core.vaultLock() }.getOrDefault(false)) {
+            unlockVault {}
+        }
+    }
+
     override fun onPause() {
         super.onPause()
+        hiddenAt = System.currentTimeMillis()
         if (!ready) return
         val tabs = Tabs.list.filter { isWebPage(it.url) }.map { SavedTab(it.url, it.title) }
         work.execute {
@@ -551,6 +567,8 @@ class MainActivity : Activity(), Plugins.Ui {
         }
         add("History") { showHistory() }
         add("Settings") { showSettings() }
+        add("Security level: ${levelName(Engine.level(this))}") { showLevel() }
+        add("Route: ${routeName(Engine.route(this))}") { showRoute() }
         add("Plugins") { showPlugins() }
         add("Sync account…") { showSync() }
         val widgets = getSystemService(android.appwidget.AppWidgetManager::class.java)
@@ -560,6 +578,7 @@ class MainActivity : Activity(), Plugins.Ui {
             }
         }
         add("Wisp password") { changePassword() }
+        add("Wipe everything…") { askWipe() }
         add("Close all tabs") {
             Tabs.list.toList().forEach { it.close() }
             Tabs.list.clear()
@@ -613,9 +632,8 @@ class MainActivity : Activity(), Plugins.Ui {
         Setting("Block third-party cookies", "block_third_party_cookies", true),
         Setting("Strict tracking protection", "tracking_prevention", true, restart = true),
         Setting("JavaScript", "javascript", true),
-        Setting("Safer JavaScript (slower)", "no_jit", false),
-        Setting("WebGL", "webgl", false),
-        Setting("WebRTC", "webrtc", false),
+        Setting("WebGL (Standard level only)", "webgl", false),
+        Setting("WebRTC (Standard level, not on Tor)", "webrtc", false),
         Setting("Save history", "save_history", false),
         Setting("Reopen tabs", "restore_tabs", false),
         Setting("Keep cookies and site data", "persistent_profile", false, restart = true),
@@ -623,8 +641,8 @@ class MainActivity : Activity(), Plugins.Ui {
 
     private fun showSettings() {
         val cfg = Engine.config
-        val labels = (settings.map { it.label } + "Route through Orbot (Tor)").toTypedArray()
-        val checked = (settings.map { cfg.optBoolean(it.key, it.default) } + Engine.torEnabled(this)).toBooleanArray()
+        val labels = (settings.map { it.label } + "Allow screenshots of Wisp").toTypedArray()
+        val checked = (settings.map { cfg.optBoolean(it.key, it.default) } + prefs.getBoolean("screenshots", false)).toBooleanArray()
         val before = checked.copyOf()
         AlertDialog.Builder(this)
             .setTitle("Settings")
@@ -632,17 +650,17 @@ class MainActivity : Activity(), Plugins.Ui {
             .setPositiveButton("Save") { _, _ ->
                 val changes = JSONObject()
                 settings.forEachIndexed { i, s -> if (checked[i] != before[i]) changes.put(s.key, checked[i]) }
-                val tor = checked.last()
+                val screenshots = checked.last()
                 val restart = settings.indices.any { checked[it] != before[it] && settings[it].restart }
                 try {
                     if (changes.length() > 0) Engine.core.setConfig(changes.toString())
                 } catch (e: Exception) {
                     Toast.makeText(this, e.message, Toast.LENGTH_LONG).show()
                 }
-                prefs.edit().putBoolean("tor", tor).apply()
+                prefs.edit().putBoolean("screenshots", screenshots).apply()
+                applyScreenPrivacy()
                 Engine.reloadConfig()
                 applyLive()
-                if (tor && !before.last()) checkOrbot()
                 if (restart) Toast.makeText(this, "Some changes take effect when Wisp next starts", Toast.LENGTH_LONG).show()
             }
             .setNegativeButton("Cancel", null)
@@ -654,7 +672,6 @@ class MainActivity : Activity(), Plugins.Ui {
         val cfg = Engine.config
         val s = Engine.runtime.settings
         s.setAllowInsecureConnections(if (cfg.optBoolean("https_only", true)) GeckoRuntimeSettings.HTTPS_ONLY else GeckoRuntimeSettings.ALLOW_ALL)
-        s.setJavaScriptEnabled(cfg.optBoolean("javascript", true))
         val cb = s.contentBlocking
         val behavior = if (cfg.optBoolean("block_third_party_cookies", true)) ContentBlocking.CookieBehavior.ACCEPT_FIRST_PARTY
             else ContentBlocking.CookieBehavior.ACCEPT_FIRST_PARTY_AND_ISOLATE_OTHERS
@@ -663,6 +680,108 @@ class MainActivity : Activity(), Plugins.Ui {
         cb.setQueryParameterStrippingEnabled(cfg.optBoolean("strip_tracking_params", true))
         cb.setQueryParameterStrippingPrivateBrowsingEnabled(cfg.optBoolean("strip_tracking_params", true))
         Engine.applyPrefs(this)
+    }
+
+    // ---- screen privacy, security level, route, wipe ----
+
+    /** No screenshots of Wisp, and a blank card in the recent apps, unless allowed. */
+    private fun applyScreenPrivacy() {
+        if (prefs.getBoolean("screenshots", false)) window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        else window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+    }
+
+    private fun levelName(level: Engine.Level) = when (level) {
+        Engine.Level.STANDARD -> "Standard"
+        Engine.Level.SAFER -> "Safer"
+        Engine.Level.SAFEST -> "Safest"
+    }
+
+    private fun showLevel() {
+        val levels = Engine.Level.entries
+        val labels = arrayOf(
+            "Standard\nEverything works, fastest. WebGPU, asm.js and rarely used font formats are still off.",
+            "Safer\nNo JIT compilers (most browser exploits go through them), no WebAssembly, WebGL, WebRTC or MathML. Heavy sites are slower.",
+            "Safest\nAlso no JavaScript at all and only the phone's own fonts. Many sites break.",
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Security level")
+            .setSingleChoiceItems(labels, levels.indexOf(Engine.level(this))) { dialog, i ->
+                Engine.setLevel(this, levels[i])
+                Engine.applyPrefs(this)
+                dialog.dismiss()
+                Toast.makeText(this, "${levelName(levels[i])}: pages use it as they load or reload", Toast.LENGTH_LONG).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun routeName(route: Engine.Route) = when (route) {
+        Engine.Route.DIRECT -> "direct"
+        Engine.Route.TOR -> "Tor"
+        Engine.Route.ORBOT -> "Orbot"
+    }
+
+    private fun showRoute() {
+        val routes = Engine.Route.entries
+        val labels = arrayOf(
+            "Direct\nStraight out, through your VPN if one is on.",
+            "Tor (built in)\nEverything goes through Tor, names looked up there too. Slower; nothing loads until it's connected.",
+            "Orbot\nThrough the Orbot app's Tor instead, if you run it.",
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Route")
+            .setSingleChoiceItems(labels, routes.indexOf(Engine.route(this))) { dialog, i ->
+                Engine.setRoute(this, routes[i])
+                dialog.dismiss()
+                startRoute()
+                Tabs.current?.session?.reload()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** Start (or stop) the built-in Tor for the route, and point Gecko at it. */
+    private fun startRoute() {
+        val route = Engine.route(this)
+        if (route != Engine.Route.TOR) Tor.stop(this)
+        Engine.applyPrefs(this)
+        when (route) {
+            Engine.Route.ORBOT -> checkOrbot()
+            Engine.Route.TOR -> {
+                if (Tor.port == 0) showNotice("Connecting to Tor… pages load once it's connected")
+                Tor.start(this) { status ->
+                    main.post {
+                        when (status) {
+                            org.torproject.jni.TorService.STATUS_ON -> {
+                                notice.visibility = View.GONE
+                                Toast.makeText(this, "Connected to Tor", Toast.LENGTH_SHORT).show()
+                                Tabs.current?.takeIf { it.progress < 100 || it.url != "about:blank" }?.session?.reload()
+                            }
+                            org.torproject.jni.TorService.STATUS_STARTING -> {}
+                            else -> showNotice("Tor isn't connected: pages won't load until it is", "Try again" to { Tor.stop(this); startRoute() })
+                        }
+                    }
+                }
+            }
+            Engine.Route.DIRECT -> {}
+        }
+    }
+
+    /**
+     * Wipe everything Wisp keeps: tabs, history, the vault (saved logins,
+     * bookmarks and the sync login on this phone), cookies, site data and
+     * settings, as Android's own "Clear storage" does. Synced copies on the
+     * sync service stay there.
+     */
+    private fun askWipe() {
+        AlertDialog.Builder(this)
+            .setTitle("Wipe everything?")
+            .setMessage("Every tab, your history, the vault with your saved passwords, bookmarks and sync login, cookies, site data and settings are deleted from this phone, and Wisp closes. This can't be undone. What's on your sync service stays there.")
+            .setPositiveButton("Wipe") { _, _ ->
+                (getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager).clearApplicationUserData()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     /** Orbot listens on 127.0.0.1:9050 while it runs; without it pages don't load (never around it). */

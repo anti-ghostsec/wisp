@@ -234,6 +234,13 @@ pub struct Api {
 }
 
 impl Api {
+    /// Forget the plugins' kept data and the synced entries held in memory
+    /// (the vault is locking). Session values stay: they're never kept.
+    pub fn forget(&self) {
+        self.storage.borrow_mut().clear();
+        self.sync.forget();
+    }
+
     pub fn new(sync: Rc<Sync>) -> Api {
         Api { storage: RefCell::new(HashMap::new()), session: RefCell::new(HashMap::new()), sync }
     }

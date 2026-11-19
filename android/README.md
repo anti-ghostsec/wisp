@@ -61,20 +61,40 @@ security fixes reach Wisp, so move to each one.
   `adblock` and `adblock+2`... `adblock+4`, turned on and off together. The lists
   are fetched when the app is built (kept for 4 days in `android/build/lists`):
   they're as fresh as the build.
-- **Off**: WebGL, WebRTC (also no IP leak through it), Gecko's prefetching,
-  `<a ping>`, its captive-portal and connectivity checks. *Safer JavaScript*
-  turns off the JIT compilers (and WebAssembly).
+- **Off**: WebGL, WebRTC (also no IP leak through it), WebGPU, asm.js,
+  Graphite and SVG-in-OpenType fonts, Gecko's prefetching, `<a ping>`, its
+  captive-portal and connectivity checks.
+- **Security level** (☰ → *Security level*), like Tor Browser's:
+  - *Standard*: everything else works; WebGL and WebRTC as set in Settings.
+  - *Safer* (the default): no JIT compilers (most browser exploits go through
+    them), so no WebAssembly either; no SharedArrayBuffer, WebGL, WebRTC or
+    MathML. Heavy sites and web apps are slower.
+  - *Safest*: also no JavaScript at all, and only the phone's own fonts.
+- **Site isolation** (Gecko's Fission): each site gets content processes of
+  its own, so a page that takes over its process still can't read another
+  site's. Content processes run as Android *isolated processes*.
 - **Fingerprinting**: Gecko's fingerprinting protection, and the
   `fingerprint-shield` plugin.
 - **Permissions**: location, camera, microphone, notifications: denied.
 - **Pop-ups**: held by Gecko's blocker, shown in the bar with **Open** /
   **Always allow on this site**.
 - **App links** (`mailto:`, `magnet:`, ...) open in another app after asking.
-- **Content processes** run as Android *isolated processes*.
-- **Routes**: straight out, through your VPN if one is on, or
-  **Route through Orbot (Tor)** in Settings: everything (pages, the sync
-  service) goes through Orbot's SOCKS port with host names looked up through
-  Tor. If Orbot isn't running, nothing loads: Wisp never goes around it.
+- **Route** (☰ → *Route*):
+  - *Direct*: straight out, through your VPN if one is on.
+  - *Tor (built in)*: Tor runs inside Wisp (the Guardian Project's
+    tor-android, the tor Orbot runs). Everything (pages, the sync service)
+    goes through it, host names looked up through Tor too. Until it's
+    connected Gecko is pointed at a port nothing listens on: nothing loads,
+    and nothing ever goes around it.
+  - *Orbot*: through the Orbot app's SOCKS port instead, the same way.
+- **Screen privacy**: no screenshots or screen recordings of Wisp, and a
+  blank card in the recent apps (*Allow screenshots of Wisp* in Settings
+  turns it off). With a Wisp password, the vault locks again after five
+  minutes in the background: saved logins, bookmarks, history and plugin
+  data leave memory until you unlock it.
+- **Wipe everything** (☰): every tab, the history, the vault, cookies, site
+  data and settings are deleted from the phone at once, as Android's "Clear
+  storage" does. What's on the sync service stays there.
 - **No backups**: nothing of Wisp's goes into Android's cloud backups or
   device transfers.
 

@@ -44,6 +44,8 @@ android {
 
 dependencies {
     implementation("org.mozilla.geckoview:geckoview-$abi:$geckoview")
+    // Tor, built in: the Guardian Project's build of tor, the one Orbot runs.
+    implementation("info.guardianproject:tor-android:0.4.9.17")
     // The Kotlin side of the Rust core's bindings (UniFFI).
     implementation("net.java.dev.jna:jna:5.19.1@aar")
 }

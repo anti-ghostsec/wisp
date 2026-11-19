@@ -303,6 +303,16 @@ impl Vault {
         vault
     }
 
+    /// Lock a vault that has a password again: its key and the sync login
+    /// are wiped from memory (they're wiped as they're dropped) until it's
+    /// unlocked. A vault without a password stays open: there's nothing to
+    /// ask for.
+    pub fn lock(&self) {
+        if self.protected() {
+            *self.open.borrow_mut() = None;
+        }
+    }
+
     /// The vault had a password and now the file has none, without Wisp
     /// having removed it: someone or something else replaced the file.
     pub fn downgraded(&self) -> bool {
