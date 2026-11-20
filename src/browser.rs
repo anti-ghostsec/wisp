@@ -10,6 +10,7 @@ use crate::sync::{self, Account, Sync};
 use crate::tooltip::PageTip;
 use crate::vault;
 use crate::bigcopy;
+use crate::share;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::cell::{Cell, RefCell};
@@ -824,6 +825,15 @@ impl BrowserWindow {
             .visible(!shared.downloads.is_empty())
             .build();
         toolbar.append(&downloads_button);
+        // On FerroOS: share this page with another program (its Share box).
+        if share::available() {
+            let share_button = gtk::Button::builder()
+                .child(&icons::from_svg(icons::SHARE).unwrap())
+                .tooltip_text("Share page")
+                .action_name("win.share-page")
+                .build();
+            toolbar.append(&share_button);
+        }
         let plugin_bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
         toolbar.append(&plugin_bar);
 
@@ -1127,6 +1137,15 @@ impl BrowserWindow {
             });
             self.window.add_action(&action);
         };
+        add("share-page", Box::new(|w| {
+            let Some(uri) = w.current_view().and_then(|v| v.uri()).map(|u| u.to_string()) else { return };
+            if !(uri.starts_with("https://") || uri.starts_with("http://")) {
+                return w.share_failed("Only web pages can be shared.".into());
+            }
+            if let Err(e) = share::link(&uri) {
+                w.share_failed(e);
+            }
+        }));
         add("new-tab", Box::new(|w| {
             w.new_tab(None, None, true);
             w.entry.grab_focus();
@@ -1497,6 +1516,9 @@ impl BrowserWindow {
         ));
         vbox.append(&no_jit);
         vbox.append(&gtk::Button::builder().label("History (Ctrl+H)").action_name("win.history").build());
+        if share::available() {
+            vbox.append(&gtk::Button::builder().label("Share page…").action_name("win.share-page").build());
+        }
         // Set, change or remove the password that locks saved passwords,
         // bookmarks, history and tabs; or unlock them if that was put off.
         let lock = gtk::Button::with_label("Wisp password…");
@@ -2388,6 +2410,57 @@ impl BrowserWindow {
             menu.remove(item);
             menu.insert(&webkit6::ContextMenuItem::from_gaction(&action, label, None), pos as i32);
         }
+        self.add_share_menu_items(menu, hit);
+    }
+
+    /// On FerroOS: Share Picture… and Share Link…, through its Share box.
+    fn add_share_menu_items(self: &Rc<Self>, menu: &webkit6::ContextMenu, hit: &webkit6::HitTestResult) {
+        if !share::available() {
+            return;
+        }
+        let page = self.current_view().and_then(|v| v.uri()).map(|u| u.to_string()).unwrap_or_default();
+        let mut items = Vec::new();
+        if hit.context_is_image()
+            && let Some(uri) = hit.image_uri()
+        {
+            let action = gio::SimpleAction::new("share-picture", None);
+            let (w, uri, page) = (Rc::downgrade(self), uri.to_string(), page.clone());
+            action.connect_activate(move |_, _| {
+                let (w, uri, page) = (w.clone(), uri.clone(), page.clone());
+                glib::spawn_future_local(async move {
+                    if let Err(e) = share::picture(&uri, &page).await
+                        && let Some(win) = w.upgrade()
+                    {
+                        win.share_failed(e);
+                    }
+                });
+            });
+            items.push(webkit6::ContextMenuItem::from_gaction(&action, "Share Picture…", None));
+        }
+        if hit.context_is_link()
+            && let Some(uri) = hit.link_uri().map(|u| u.to_string()).filter(|u| u.starts_with("https://") || u.starts_with("http://"))
+        {
+            let action = gio::SimpleAction::new("share-link", None);
+            let w = Rc::downgrade(self);
+            action.connect_activate(move |_, _| {
+                if let Err(e) = share::link(&uri)
+                    && let Some(win) = w.upgrade()
+                {
+                    win.share_failed(e);
+                }
+            });
+            items.push(webkit6::ContextMenuItem::from_gaction(&action, "Share Link…", None));
+        }
+        if !items.is_empty() {
+            menu.append(&webkit6::ContextMenuItem::new_separator());
+            for item in items {
+                menu.append(&item);
+            }
+        }
+    }
+
+    fn share_failed(&self, why: String) {
+        gtk::AlertDialog::builder().message("Couldn't share").detail(why).build().show(Some(&self.window));
     }
 
     fn add_plugin_menu_items(&self, view: &WebView, menu: &webkit6::ContextMenu, hit: &webkit6::HitTestResult) {

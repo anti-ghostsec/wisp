@@ -5,6 +5,8 @@ use gtk::prelude::*;
 use gtk::{cairo, gsk};
 
 pub const NEW_TAB: &str = include_str!("icons/wisp-tab-new-symbolic.svg");
+/// Share (FerroOS's Share box).
+pub const SHARE: &str = include_str!("icons/wisp-share-symbolic.svg");
 
 /// A 16 px icon made of the `<path>` elements of a single-color SVG.
 /// Returns None when the SVG has no usable paths.

@@ -56,6 +56,14 @@ Wisp for Android, on GeckoView with the same Rust core (`core/`), is in
   link (stored in `allowed_app_links`).
 - **Files and links from other apps** open as new tabs in the Wisp window
   you're using, not as another browser window.
+- **Share** (on FerroOS): the toolbar's Share button and ☰ → *Share page…*
+  send the page's address to another program, and a picture's or link's
+  right-click menu has *Share Picture…* and *Share Link…*. FerroOS's Share
+  box asks which program gets it, and that program gets a copy in memory
+  (pictures without their location data, unless you untick it). Wisp
+  isn't told which program, or whether anything was shared. A picture is
+  fetched again for this, with no cookies, and only its page's site as
+  Referer. Elsewhere there's no Share box, so no Share in Wisp either.
 - **Permissions**: geolocation, camera, microphone and notification requests
   are denied.
 - **Fingerprinting**: the `fingerprint-shield` plugin reports uniform device values.

@@ -14,6 +14,7 @@ mod tooltip;
 mod vault;
 mod bigcopy;
 mod runtime;
+mod share;
 
 use browser::{BrowserWindow, Shared};
 use gtk::prelude::*;
