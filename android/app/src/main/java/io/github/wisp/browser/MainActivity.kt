@@ -57,6 +57,8 @@ private const val PICK_FILES = 1
 private const val RELOCK_AFTER_MS = 5 * 60_000L
 /** A new tab to type an address or search into (a search with nothing typed yet). */
 private const val TYPE = "wisp:type"
+/** Sites allowed pop-ups, until Wisp closes. */
+private val popupsAllowed = mutableSetOf<String>()
 
 class MainActivity : Activity(), Plugins.Ui {
     private lateinit var gecko: GeckoView
@@ -77,13 +79,15 @@ class MainActivity : Activity(), Plugins.Ui {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Older Wisps kept the sites allowed pop-ups on disk.
+        prefs.edit().remove("popups_allowed").apply()
         applyScreenPrivacy()
         buildUi()
         Engine.start(this)
         Plugins.ui = this
         Tabs.delegates = { tab, session -> connect(tab, session) }
         intent?.let { linkOf(it) }?.let { waiting += it }
-        askVault { Engine.installExtensions(this) { onReady() } }
+        askVault { Engine.afterPrefs { Engine.installExtensions(this) { onReady() } } }
     }
 
     private fun onReady() {
@@ -119,9 +123,11 @@ class MainActivity : Activity(), Plugins.Ui {
         // Web addresses only: an app naming Wisp itself could hand it any
         // other kind (file:, javascript:, resource:, ...).
         Intent.ACTION_VIEW -> intent.dataString?.takeIf { it.substringBefore(':').lowercase() in setOf("http", "https") }
+        // A search too: whatever it says, only ever a web address or a
+        // search for the text.
         Intent.ACTION_WEB_SEARCH, Intent.ACTION_SEARCH ->
             intent.getStringExtra(android.app.SearchManager.QUERY)?.trim()?.takeIf { it.isNotEmpty() }
-                ?.let { uniffi.wisp_ffi.resolveAddress(it, Engine.config.optString("search_url")) } ?: TYPE
+                ?.let { uniffi.wisp_ffi.resolveSearch(it, Engine.config.optString("search_url")) } ?: TYPE
         else -> null
     }
 
@@ -465,16 +471,19 @@ class MainActivity : Activity(), Plugins.Ui {
         session.promptDelegate = Prompts(this, tab)
     }
 
-    /** A page's pop-up held by Gecko's blocker: shown in the bar, as on desktop. */
+    /**
+     * A page's pop-up held by Gecko's blocker: shown in the bar, as on
+     * desktop. Sites allowed pop-ups are kept in memory only, until Wisp
+     * closes, as on desktop: a list on disk would say which sites you use.
+     */
     fun popupBlocked(tab: Tab, target: String?, answer: (Boolean) -> Unit) {
         val site = Engine.core.siteOf(tab.url)
-        val allowed = prefs.getStringSet("popups_allowed", emptySet())!!
-        if (site.isNotEmpty() && site in allowed) return answer(true)
+        if (site.isNotEmpty() && site in popupsAllowed) return answer(true)
         val dest = target?.let { Uri.parse(it).host } ?: "a blank page"
         showNotice("Pop-up to $dest blocked",
             "Open" to { answer(true) },
-            "Always allow on this site" to {
-                prefs.edit().putStringSet("popups_allowed", allowed + site).apply()
+            "Allow on this site" to {
+                if (site.isNotEmpty()) popupsAllowed += site
                 answer(true)
             })
     }
@@ -744,7 +753,7 @@ class MainActivity : Activity(), Plugins.Ui {
         val labels = arrayOf(
             "Direct\nStraight out, through your VPN if one is on.",
             "Tor (built in)\nEverything goes through Tor, names looked up there too. Slower; nothing loads until it's connected.",
-            "Orbot\nThrough the Orbot app's Tor instead, if you run it.",
+            "Orbot\nThrough the Orbot app's Tor instead, if you run it. Wisp can't tell Orbot from another app listening on its port (9050), so the built-in Tor is safer.",
         )
         AlertDialog.Builder(this)
             .setTitle("Route")
@@ -814,7 +823,11 @@ class MainActivity : Activity(), Plugins.Ui {
             .show()
     }
 
-    /** Orbot listens on 127.0.0.1:9050 while it runs; without it pages don't load (never around it). */
+    /**
+     * Orbot listens on 127.0.0.1:9050 while it runs; without it pages don't
+     * load (never around it). Any app can listen on that port, and Wisp
+     * can't tell which one does: the route's description says so.
+     */
     private fun checkOrbot() {
         work.execute {
             val up = runCatching { Socket().use { it.connect(InetSocketAddress("127.0.0.1", Engine.ORBOT_PORT), 1500) }; true }.getOrDefault(false)

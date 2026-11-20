@@ -1,8 +1,8 @@
 {
   "id": "fingerprint-shield",
   "name": "Fingerprint Shield",
-  "version": "1.1",
-  "description": "Reports common, uniform values for device properties that sites use to fingerprint you.",
+  "version": "1.2",
+  "description": "Reports common values for a few device properties and adds faint noise to canvas and WebGL readbacks. It does not cover fonts, audio, the time zone or screen size, and sites can tell it is there.",
   "content_scripts": [
     {
       "matches": ["*://*/*"],

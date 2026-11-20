@@ -81,8 +81,9 @@ fn is_local_ip(ip: std::net::IpAddr) -> bool {
     }
 }
 
-/// The start of a rule's pattern: http://, with or without `user@`.
-const HTTP: &str = "^http://([^/@]*@)?";
+/// The start of a rule's pattern: http:// (or ws://, `{}`), with or
+/// without `user@`.
+const HTTP: &str = "^{}://([^/@]*@)?";
 /// The end of a host in a rule's pattern: a port if there is one, then the
 /// path, which WebKit always writes (at least "/").
 const HOST_END: &str = "(:[0-9]+)?/";
@@ -114,24 +115,34 @@ const LOCAL_HOST_PATTERNS: &[&str] = &[
 /// inside the web process, before anything is sent. The upgrade done when a
 /// load starts (`rewrite_url`) comes too late for that: by then the request
 /// may be on its way. `allowed` are the `http_site`s let through as they are.
+/// WebSockets the same way: ws:// becomes wss://.
 pub fn https_filter(allowed: &[String]) -> String {
-    let mut rules = vec![serde_json::json!({
-        "trigger": { "url-filter": "^http://" },
-        "action": { "type": "make-https" },
-    })];
+    const SCHEMES: [&str; 2] = ["http", "ws"];
+    let mut rules: Vec<serde_json::Value> = SCHEMES
+        .iter()
+        .map(|scheme| {
+            serde_json::json!({
+                "trigger": { "url-filter": format!("^{scheme}://") },
+                "action": { "type": "make-https" },
+            })
+        })
+        .collect();
     let mut skip = |pattern: String| {
         rules.push(serde_json::json!({
             "trigger": { "url-filter": pattern },
             "action": { "type": "ignore-previous-rules" },
         }));
     };
-    for host in LOCAL_HOST_PATTERNS {
-        skip(format!("{HTTP}{host}{HOST_END}"));
-    }
-    for site in allowed {
-        let Some((host, port)) = site.rsplit_once(':') else { continue };
-        let host = filter_escape(host);
-        skip(if port == "80" { format!("{HTTP}{host}(:80)?/") } else { format!("{HTTP}{host}:{port}/") });
+    for scheme in SCHEMES {
+        let start = HTTP.replace("{}", scheme);
+        for host in LOCAL_HOST_PATTERNS {
+            skip(format!("{start}{host}{HOST_END}"));
+        }
+        for site in allowed {
+            let Some((host, port)) = site.rsplit_once(':') else { continue };
+            let host = filter_escape(host);
+            skip(if port == "80" { format!("{start}{host}(:80)?/") } else { format!("{start}{host}:{port}/") });
+        }
     }
     serde_json::Value::Array(rules).to_string()
 }
@@ -140,9 +151,21 @@ pub fn https_filter(allowed: &[String]) -> String {
 /// no `<a ping>`, a request to a tracker each time a link is clicked (which
 /// WebKit no longer has a setting for; beacons are sent the same way and go
 /// too).
-pub fn own_filter(https_only: bool, allowed: &[String]) -> String {
+///
+/// With `block_onion`, nothing goes to a .onion address: without a Tor
+/// proxy the name would only be asked of the system's DNS servers, which
+/// tells them what you were after.
+pub fn own_filter(https_only: bool, allowed: &[String], block_onion: bool) -> String {
     let mut rules: Vec<serde_json::Value> =
         if https_only { serde_json::from_str(&https_filter(allowed)).unwrap_or_default() } else { Vec::new() };
+    // After the HTTPS rules, whose exceptions (.onion among them) would
+    // undo it.
+    if block_onion {
+        rules.push(serde_json::json!({
+            "trigger": { "url-filter": ONION },
+            "action": { "type": "block" },
+        }));
+    }
     // Last: an exception to HTTPS-only mustn't let a ping through.
     rules.push(serde_json::json!({
         "trigger": { "url-filter": ".*", "resource-type": ["ping"] },
@@ -150,6 +173,9 @@ pub fn own_filter(https_only: bool, allowed: &[String]) -> String {
     }));
     serde_json::Value::Array(rules).to_string()
 }
+
+/// Any address at a .onion host, as a content filter's pattern.
+const ONION: &str = r"^[a-z][a-z0-9+.-]*://([^/@]*@)?[^/:@]*\.onion\.?(:[0-9]+)?/";
 
 /// A host as a literal in a content filter's pattern.
 fn filter_escape(text: &str) -> String {
@@ -302,12 +328,16 @@ mod tests {
         let rules = rules.as_array().unwrap();
         assert_eq!(rules[0]["action"]["type"], "make-https");
         assert_eq!(rules[0]["trigger"]["url-filter"], "^http://");
+        assert_eq!(rules[1]["action"]["type"], "make-https");
+        assert_eq!(rules[1]["trigger"]["url-filter"], "^ws://");
         // Not only pages: pictures, scripts and requests too.
         assert!(rules[0]["trigger"].get("resource-type").is_none());
-        // Everything after the first rule is an exception to it.
-        assert!(rules[1..].iter().all(|r| r["action"]["type"] == "ignore-previous-rules"));
-        let patterns: Vec<&str> = rules[1..].iter().map(|r| r["trigger"]["url-filter"].as_str().unwrap()).collect();
-        assert_eq!(patterns.len(), LOCAL_HOST_PATTERNS.len() + 3);
+        // Everything after the first two rules is an exception to them.
+        assert!(rules[2..].iter().all(|r| r["action"]["type"] == "ignore-previous-rules"));
+        let patterns: Vec<&str> = rules[2..].iter().map(|r| r["trigger"]["url-filter"].as_str().unwrap()).collect();
+        assert_eq!(patterns.len(), 2 * (LOCAL_HOST_PATTERNS.len() + 3));
+        assert!(patterns.contains(&r"^ws://([^/@]*@)?([^/:@]*\.)?localhost(:[0-9]+)?/"));
+        assert!(patterns.contains(&r"^ws://([^/@]*@)?a\.com(:80)?/"));
         assert!(patterns.contains(&r"^http://([^/@]*@)?([^/:@]*\.)?localhost(:[0-9]+)?/"));
         assert!(patterns.contains(&r"^http://([^/@]*@)?192\.168\.[0-9.]+(:[0-9]+)?/"));
         assert!(patterns.contains(&r"^http://([^/@]*@)?a\.com(:80)?/"));
@@ -318,7 +348,7 @@ mod tests {
     #[test]
     fn own_filter_blocks_pings_last() {
         for https_only in [true, false] {
-            let rules: serde_json::Value = serde_json::from_str(&own_filter(https_only, &["a.com:80".into()])).unwrap();
+            let rules: serde_json::Value = serde_json::from_str(&own_filter(https_only, &["a.com:80".into()], false)).unwrap();
             let rules = rules.as_array().unwrap();
             let last = rules.last().unwrap();
             assert_eq!(last["action"]["type"], "block");
@@ -327,12 +357,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn onion_addresses_are_blocked_without_tor() {
+        let onion = regex::Regex::new(ONION).unwrap();
+        for url in ["http://abc.onion/", "https://x.abc.onion:8080/a", "ws://u@abc.onion/", "https://abc.onion./"] {
+            assert!(onion.is_match(url), "{url}");
+        }
+        for url in ["https://onion.com/", "https://a.onion.com/", "https://x.com/?u=http://a.onion/", "https://a.onion@x.com/"] {
+            assert!(!onion.is_match(url), "{url}");
+        }
+        let rules: serde_json::Value = serde_json::from_str(&own_filter(true, &[], true)).unwrap();
+        let rules = rules.as_array().unwrap();
+        let at = rules.iter().position(|r| r["trigger"]["url-filter"] == ONION).unwrap();
+        // After every exception that would undo it.
+        assert!(rules[at..].iter().all(|r| r["action"]["type"] == "block"));
+        let none: serde_json::Value = serde_json::from_str(&own_filter(true, &[], false)).unwrap();
+        assert!(none.as_array().unwrap().iter().all(|r| r["trigger"]["url-filter"] != ONION));
+    }
+
     /// The filter's exceptions, run as the regular expressions they are:
     /// a local-looking user name never lets another host through.
     #[test]
     fn https_filter_exceptions_match_the_host_only() {
         let rules: serde_json::Value = serde_json::from_str(&https_filter(&["a.com:80".into()])).unwrap();
-        let skips: Vec<regex::Regex> = rules.as_array().unwrap()[1..]
+        let skips: Vec<regex::Regex> = rules.as_array().unwrap()[2..]
             .iter()
             .map(|r| regex::Regex::new(r["trigger"]["url-filter"].as_str().unwrap()).unwrap())
             .collect();

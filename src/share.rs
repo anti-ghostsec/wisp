@@ -43,6 +43,9 @@ pub fn link(url: &str) -> Result<(), String> {
 /// Share `data` as a file named `name`; it goes to the Share box through a
 /// pipe, never through a file.
 pub fn bytes(name: &str, data: &[u8]) -> Result<(), String> {
+    if name.starts_with('-') {
+        return Err("a file name can't start with \"-\"".into());
+    }
     let mut cmd = Command::new(bin());
     cmd.args(["--stdin", name]);
     spawn(cmd, Some(data))
@@ -207,7 +210,9 @@ fn picture_name(uri: &str, mime: Option<&str>) -> String {
     };
     let last = String::from_utf8_lossy(&percent_decode(last)).into_owned();
     let stem: String = last.chars().filter(|c| !matches!(c, '/' | '\\' | '\0')).take(100).collect();
-    let stem = stem.trim().trim_start_matches('.');
+    // Never a hidden file, nor one that a program it's handed to could
+    // take for an option ("-rf.png", "--output=x").
+    let stem = stem.trim().trim_start_matches(['.', '-']).trim_start();
     let has_ext = Path::new(stem).extension().is_some_and(|e| !e.is_empty());
     match (stem.is_empty(), has_ext, ext.is_empty()) {
         (true, _, true) => "picture".into(),
@@ -230,6 +235,9 @@ mod tests {
         assert_eq!(picture_name("data:image/gif;base64,R0lG", Some("image/gif")), "picture.gif");
         assert_eq!(picture_name("https://a.b/my%20cat.png", None), "my cat.png");
         assert_eq!(picture_name("https://a.b/..hidden", None), "hidden");
+        assert_eq!(picture_name("https://a.b/--output=x.png", None), "output=x.png");
+        assert_eq!(picture_name("https://a.b/-.-rf", Some("image/png")), "rf.png");
+        assert_eq!(picture_name("https://a.b/%2D-x.jpg", None), "x.jpg");
     }
 
     #[test]

@@ -23,12 +23,14 @@ Wisp for Android, on GeckoView with the same Rust core (`core/`), is in
 - **Private session**: an ephemeral network session, so cookies, cache and
   site storage never touch the disk. Set `persistent_profile: true` to keep them.
 - **HTTPS-only**: http:// pages, frames and everything they load (pictures,
-  scripts, requests) are upgraded before anything is sent, sites given as a public IP address included; only this computer,
+  scripts, requests, ws:// WebSockets) are upgraded before anything is sent, sites given as a public IP address included; only this computer,
   the local network (private and link-local addresses) and `.local`,
   `.onion`, `.test` and `localhost` names stay on HTTP. If HTTPS fails, a
   warning page lets you continue over HTTP for that host and port, for this
   session only (it's kept in memory, never written to disk). Only that
   page's own button can do so: a web page can't allow HTTP for another site.
+- **.onion addresses** are refused unless the system's proxy (Tor) takes
+  them: never asked of the system's DNS servers.
 - **Tracking parameters** (`utm_*`, `fbclid`, `gclid`, …, in any case) are
   removed from URLs: from links you click and addresses you open before
   they're sent, and from links you share.
@@ -39,11 +41,22 @@ Wisp for Android, on GeckoView with the same Rust core (`core/`), is in
   content blocker. Navigating or redirecting to a listed ad or scam domain is
   blocked too.
 - **Pop-up guard**: a script pop-up to another site (the usual click-hijack or
-  pop-under trick) is held behind a bar with **Open** / **Always allow on this
-  site**. Normal `target=_blank` links open as tabs.
+  pop-under trick) is held behind a bar with **Open** / **Allow on this
+  site** (until Wisp closes). Normal `target=_blank` links open as tabs.
 - **Disabled features**: WebGL, WebRTC, WebKit's own credential storage and
   script popups are off, and so is `<a ping>` (no request goes out when you
-  click a link that has one).
+  click a link that has one). So are WebKit's fixes for particular sites,
+  DNS prefetching, prefetch and preconnect hints, and the Web Inspector
+  until Ctrl+Shift+I or F12 turns it on for the run.
+- **Wisp's own pages** (`wisp:` and plugins' `wisp-plugin://` pages) can't
+  be opened, framed or loaded by web pages, only by Wisp itself.
+- **Paste and Go** (right-click the address bar) goes at once only for an
+  address or words to search for. A copied password (marked secret) is
+  never pasted, and text that could be one is put in the bar for you to
+  check and press Enter.
+- **Downloads** aren't added to the desktop's list of recent files, and a
+  Windows or Java program (`.exe`, `.msi`, `.jar`, ...) asks before it's
+  opened.
 - **Safer JavaScript** (☰ → *Safer JavaScript (slower)*, `no_jit`, off by
   default): scripts run in JavaScriptCore's interpreter only, without the
   JIT compiler that most browser exploits go through. Heavy sites and web
@@ -68,7 +81,11 @@ Wisp for Android, on GeckoView with the same Rust core (`core/`), is in
   Referer. Elsewhere there's no Share box, so no Share in Wisp either.
 - **Permissions**: geolocation, camera, microphone and notification requests
   are denied.
-- **Fingerprinting**: the `fingerprint-shield` plugin reports uniform device values.
+- **Fingerprinting**: the `fingerprint-shield` plugin reports common values
+  for a few device properties (CPU cores, memory, touch points, color depth)
+  and adds faint per-page-load noise to canvas and WebGL readbacks. It is
+  partial: fonts, audio, the time zone, screen size and the user agent are
+  not covered, and a careful site can tell it is running.
 - **Search**: the default engine is DuckDuckGo with its ads turned off
   (`k1=-1`); its upgrade pop-over and feedback button are hidden. Type
   `ai` and a question in the address bar to ask Duck.ai instead.
@@ -330,8 +347,8 @@ that site from then on, and if it was an overlay that stopped the page from
 scrolling, scrolling works again. **Blocked elements** (in the ☰ menu)
 lists them by site to edit or remove.
 
-A plugin you install with the same id as a built-in one doesn't replace it
-unless you choose **Use Mine Instead** when Wisp asks. See
+A plugin you install with the same id as a built-in one (case, `-` and `_`
+not counting) never replaces it: it's left out, and Wisp says so. See
 [PLUGINS.md](PLUGINS.md) to write your own.
 
 ## Releases

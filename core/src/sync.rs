@@ -15,7 +15,7 @@
 use crate::config;
 use crate::vault;
 use aes_gcm::aead::consts::U16;
-use aes_gcm::aead::{Aead, KeyInit, Nonce};
+use aes_gcm::aead::{Aead, KeyInit, Nonce, Payload};
 use aes_gcm::aes::Aes256;
 use aes_gcm::AesGcm;
 use base64::Engine;
@@ -303,11 +303,14 @@ impl Sync {
     /// was; such a file is read once and written again sealed.)
     fn load_cache(&self) -> bool {
         let Some(account) = self.account() else { return self.load_local() };
-        let Some(vault_key) = vault::get().data_key() else { return false };
+        let vault = vault::get();
+        if vault.data_key().is_none() {
+            return false;
+        }
         let Ok(text) = fs::read_to_string(cache_path()) else { return false };
         let Ok(file) = serde_json::from_str::<Json>(&text) else { return false };
         let (file, legacy) = match file.get("sealed").and_then(Json::as_str) {
-            Some(blob) => match decrypt(&vault_key, blob).ok().and_then(|t| serde_json::from_str::<Json>(&t).ok()) {
+            Some(_) => match vault.read_sealed(&cache_path(), true).and_then(|t| serde_json::from_str::<Json>(&t).ok()) {
                 Some(inner) => (inner, false),
                 None => return false,
             },
@@ -354,10 +357,10 @@ impl Sync {
     }
 
     fn save_local(&self) {
-        let Some(vault_key) = vault::get().data_key() else { return };
         let Some(tree) = self.state.borrow().as_ref().map(|s| s.local.to_string()) else { return };
-        let Ok(sealed) = encrypt(&vault_key, &tree) else { return };
-        let _ = vault::write_private(&local_path(), &json!({ "sealed": sealed }).to_string());
+        if let Err(e) = vault::get().write_sealed(&local_path(), &tree, true) {
+            eprintln!("wisp: cannot save bookmarks: {e}");
+        }
     }
 
     fn save_cache(&self) {
@@ -367,11 +370,11 @@ impl Sync {
             let Some(s) = state.as_ref() else { return };
             json!({ "base": s.base, "last_updated": s.last_updated, "pending": s.pending }).to_string()
         };
-        let Some(vault_key) = vault::get().data_key() else { return };
         let Ok(blob) = encrypt(&key, &data) else { return };
         let inner = json!({ "service": account.service, "id": account.id, "key": B64.encode(key), "data": blob });
-        let Ok(sealed) = encrypt(&vault_key, &inner.to_string()) else { return };
-        let _ = vault::write_private(&cache_path(), &json!({ "sealed": sealed }).to_string());
+        if let Err(e) = vault::get().write_sealed(&cache_path(), &inner.to_string(), true) {
+            eprintln!("wisp: cannot save the bookmark cache: {e}");
+        }
     }
 
     // ---- talking to the service ----
@@ -414,6 +417,12 @@ impl Sync {
     async fn pull(&self) -> Result<(), String> {
         let account = self.account().ok_or("no sync account")?;
         let data = self.request("GET", &format!("{}/bookmarks/{}", account.service, account.id), None).await?;
+        // A copy older than the one already seen here: the service (or
+        // someone in its place) handing back what was there before.
+        let seen = self.state.borrow().as_ref().map(|s| s.last_updated.clone()).unwrap_or_default();
+        if is_older(data["lastUpdated"].as_str().unwrap_or(""), &seen) {
+            return Err("the sync service sent an older copy of your bookmarks than the one here, so it wasn't used".into());
+        }
         let blob = data["bookmarks"].as_str().unwrap_or("");
         let key = self.key().await?;
         let base: Json = if blob.is_empty() {
@@ -517,6 +526,11 @@ impl Sync {
             .await
             .map_err(|e| format!("cannot reach sync service: {e}"))?;
         let (status, bytes) = (res.status, res.body);
+        // The host never follows a redirect for this (rt::http): one is
+        // refused, wherever it points.
+        if (300..400).contains(&status) {
+            return Err(format!("{status}: the sync service sent Wisp to another address, which Wisp doesn't follow"));
+        }
         let parsed: Json = serde_json::from_slice(&bytes).unwrap_or(Json::Null);
         if !(200..300).contains(&status) {
             let detail = parsed["message"].as_str().unwrap_or("request failed");
@@ -581,6 +595,47 @@ pub fn decrypt(key: &[u8; 32], blob: &str) -> Result<String, String> {
         .decrypt(&nonce, &raw[16..])
         .map_err(|_| "cannot decrypt sync data (wrong password?)".to_string())?;
     String::from_utf8(lzutf8_decompress(&plain)).map_err(|_| "sync data is not UTF-8".to_string())
+}
+
+/// Whether the service's `lastUpdated` time `remote` is before `seen`, the
+/// last one this device had. Times as the service writes them
+/// (2024-05-01T12:00:00.000Z); anything else is never taken as older.
+fn is_older(remote: &str, seen: &str) -> bool {
+    fn key(t: &str) -> Option<(&str, u32)> {
+        let t = t.strip_suffix('Z')?;
+        let (secs, frac) = t.split_once('.').unwrap_or((t, ""));
+        if secs.len() != 19 || !secs.starts_with(|c: char| c.is_ascii_digit()) || frac.len() > 9 || !frac.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        Some((secs, format!("{frac:0<9}").parse().ok()?))
+    }
+    matches!((key(remote), key(seen)), (Some(r), Some(s)) if r < s)
+}
+
+/// AES-256-GCM as `encrypt`, with `aad` bound to it: the text only comes
+/// back with the same `aad` (what file it's for, and which version).
+pub fn encrypt_aad(key: &[u8; 32], text: &str, aad: &[u8]) -> Result<String, String> {
+    let cipher = Cipher::new_from_slice(key).map_err(|e| e.to_string())?;
+    let mut iv = [0u8; 16];
+    getrandom::fill(&mut iv).map_err(|e| e.to_string())?;
+    let sealed = cipher
+        .encrypt(&Nonce::<Cipher>::from(iv), Payload { msg: text.as_bytes(), aad })
+        .map_err(|_| "encryption failed".to_string())?;
+    let mut out = iv.to_vec();
+    out.extend_from_slice(&sealed);
+    Ok(B64.encode(out))
+}
+
+pub fn decrypt_aad(key: &[u8; 32], blob: &str, aad: &[u8]) -> Result<String, String> {
+    let raw = B64.decode(blob.trim()).map_err(|_| "not base64".to_string())?;
+    if raw.len() < 16 + 16 {
+        return Err("too short".into());
+    }
+    let cipher = Cipher::new_from_slice(key).map_err(|e| e.to_string())?;
+    let nonce = Nonce::<Cipher>::try_from(&raw[..16]).map_err(|_| "bad IV".to_string())?;
+    let plain =
+        cipher.decrypt(&nonce, Payload { msg: &raw[16..], aad }).map_err(|_| "cannot decrypt (wrong key, or not for this file)".to_string())?;
+    String::from_utf8(plain).map_err(|_| "not UTF-8".to_string())
 }
 
 /// Decoder for LZUTF8, the compression xBrowserSync applies before encrypting.
@@ -726,20 +781,17 @@ fn remove_id(node: &mut Json, id: i64) {
     }
 }
 
-fn cache_path() -> PathBuf {
+pub(crate) fn cache_path() -> PathBuf {
     config::data_dir().join("sync-cache.json")
 }
 
 /// Entries kept before sync was set up.
-fn local_path() -> PathBuf {
+pub(crate) fn local_path() -> PathBuf {
     config::data_dir().join("sync-local.json")
 }
 
 fn read_local() -> Option<Json> {
-    let vault_key = vault::get().data_key()?;
-    let text = fs::read_to_string(local_path()).ok()?;
-    let file: Json = serde_json::from_str(&text).ok()?;
-    let tree = decrypt(&vault_key, file["sealed"].as_str()?).ok()?;
+    let tree = vault::get().read_sealed(&local_path(), true)?;
     serde_json::from_str(&tree).ok()
 }
 
@@ -894,6 +946,17 @@ fn check_prefix(item: &Json, allowed: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_older_copy_from_the_service_is_noticed() {
+        assert!(is_older("2024-05-01T12:00:00.000Z", "2024-05-01T12:00:01.000Z"));
+        assert!(is_older("2024-05-01T12:00:00.5Z", "2024-05-01T12:00:00.6Z"));
+        assert!(!is_older("2024-05-01T12:00:01.000Z", "2024-05-01T12:00:00.999Z"));
+        assert!(!is_older("2024-05-01T12:00:00.000Z", "2024-05-01T12:00:00.000Z"));
+        assert!(!is_older("2024-05-01T12:00:00.000Z", ""));
+        assert!(!is_older("", "2024-05-01T12:00:00.000Z"));
+        assert!(!is_older("yesterday", "2024-05-01T12:00:00.000Z"));
+    }
 
     #[test]
     fn sync_services_are_https_or_on_this_computer() {

@@ -233,6 +233,12 @@ impl Shared {
         shared.register_scheme();
         shared.update_https_filter(|| {});
         shared.install_accels();
+        // Nothing saved or opened through Wisp goes into GTK's list of
+        // recent files (recently-used.xbel), which other apps show.
+        if let Some(settings) = gtk::Settings::default() {
+            settings.set_gtk_recent_files_enabled(false);
+            settings.set_gtk_recent_files_max_age(0);
+        }
         install_css();
         apply_dark_ui(shared.config.borrow().dark_ui);
         shared.install_plugin_accels();
@@ -597,11 +603,16 @@ impl Shared {
                 )),
             }
         });
+        // Only Wisp itself (the address bar, its tabs and windows) and pages
+        // of the same scheme may open, frame or load these: a web page that
+        // could would learn which plugins you have, or lay Wisp's own pages
+        // under its clicks.
         if let Some(sec) = self.context.security_manager() {
-            sec.register_uri_scheme_as_secure("wisp");
-            sec.register_uri_scheme_as_no_access("wisp");
-            sec.register_uri_scheme_as_secure(plugins::PAGE_SCHEME);
-            sec.register_uri_scheme_as_no_access(plugins::PAGE_SCHEME);
+            for scheme in ["wisp", plugins::PAGE_SCHEME] {
+                sec.register_uri_scheme_as_secure(scheme);
+                sec.register_uri_scheme_as_no_access(scheme);
+                sec.register_uri_scheme_as_display_isolated(scheme);
+            }
         }
     }
 
@@ -643,32 +654,20 @@ impl Shared {
         }
     }
 
-    /// Your own plugins left out for having a built-in plugin's id: say so,
-    /// and offer to use yours instead (from the next start).
+    /// Plugins of your own left out for having a built-in plugin's id: say
+    /// so. The built-in one is always used, since a plugin with its id would
+    /// get everything it has, such as your saved data for it.
     pub fn ask_about_shadowed_plugins(self: &Rc<Self>) {
         for (id, dir) in self.plugins.shadowed.clone() {
             let builtin = self.plugins.get(&id).map(|p| p.manifest.name.clone()).unwrap_or_else(|| id.clone());
             let dialog = gtk::AlertDialog::builder()
                 .message(format!("Using the built-in {builtin} plugin"))
                 .detail(format!(
-                    "{} has the same id (\"{id}\") as the built-in {builtin} plugin, so it was left out. A plugin with that id gets everything the built-in one has, such as your saved data for it.\n\nUse yours instead only if you made it or trust it. It takes effect the next time Wisp starts.",
+                    "{} has the same id as the built-in {builtin} plugin (\"{id}\"), so it was left out. A plugin with that id would get everything the built-in one has, such as your saved data for it.\n\nTo use it, give it an id of its own in its plugin.json.",
                     dir.display()
                 ))
-                .buttons(["Keep Built-in", "Use Mine Instead"])
-                .cancel_button(0)
-                .default_button(0)
                 .build();
-            let shared = self.clone();
-            let parent = self.last_window().map(|w| w.window.clone());
-            dialog.choose(parent.as_ref(), None::<&gio::Cancellable>, move |choice| {
-                if choice == Ok(1) {
-                    let mut cfg = shared.config.borrow_mut();
-                    if !cfg.plugin_overrides.contains(&id) {
-                        cfg.plugin_overrides.push(id);
-                        cfg.save();
-                    }
-                }
-            });
+            dialog.show(self.last_window().map(|w| w.window.clone()).as_ref());
         }
     }
 
@@ -759,14 +758,20 @@ impl Shared {
     /// blocks `<a ping>`) in line with the HTTPS-only setting and the sites
     /// allowed over HTTP; `then` runs once it's in force.
     fn update_https_filter(self: &Rc<Self>, then: impl FnOnce() + 'static) {
-        let rules = {
-            let mut allowed: Vec<String> = self.http_allowed.borrow().iter().cloned().collect();
-            allowed.sort();
-            Some(privacy::own_filter(self.config.borrow().https_only, &allowed))
-        };
         let plugins = self.plugins.clone();
+        let guard = plugins.hold_filters();
+        let me = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            plugins.set_own_filter(rules).await;
+            let block_onion = !onion_proxied().await;
+            // The settings as they are now, after the wait: a later call
+            // that got here first is never undone with older ones.
+            let Some(me) = me.upgrade() else { return };
+            let mut allowed: Vec<String> = me.http_allowed.borrow().iter().cloned().collect();
+            allowed.sort();
+            let rules = privacy::own_filter(me.config.borrow().https_only, &allowed, block_onion);
+            drop(me);
+            plugins.set_own_filter(Some(rules)).await;
+            drop(guard);
             then();
         });
     }
@@ -784,8 +789,18 @@ impl Shared {
     }
 }
 
+/// Whether .onion addresses go through a proxy (Tor, set as the system's
+/// proxy), which looks their names up itself. Without one they're refused:
+/// the system's DNS servers would be asked for them.
+async fn onion_proxied() -> bool {
+    gio::ProxyResolver::default()
+        .lookup_future("http://wisp-check.onion/")
+        .await
+        .is_ok_and(|proxies| proxies.iter().any(|p| !p.starts_with("direct://")))
+}
+
 /// The one use of "Continue over HTTP" a "secure connection failed" page
-/// has. Its link is `wisp:allow-http?<token>`: a page that opens such a
+/// has. Its link is `wisp-allow-http:<token>`: a page that opens such a
 /// link itself can't know the token, so it can't allow anything.
 struct HttpOffer {
     token: String,
@@ -979,7 +994,7 @@ impl BrowserWindow {
         popup_box.set_margin_bottom(2);
         popup_box.append(&gtk::Image::from_icon_name("dialog-warning-symbolic"));
         popup_box.append(&popup_label);
-        for (label, action) in [("Open", "win.popup-open"), ("Always allow on this site", "win.popup-allow")] {
+        for (label, action) in [("Open", "win.popup-open"), ("Allow on this site", "win.popup-allow")] {
             popup_box.append(&gtk::Button::builder().label(label).action_name(action).build());
         }
         let dismiss = icon_button("window-close-symbolic", "Dismiss", "win.popup-dismiss");
@@ -1152,7 +1167,8 @@ impl BrowserWindow {
         });
         self.entry.add_controller(click);
         // "Paste and Go" in the address bar's right-click menu, as in
-        // Firefox and Chrome: what's copied is opened (or searched for) at once.
+        // Firefox and Chrome: what's copied is opened (or searched for) at
+        // once, unless it could be a password.
         let extra = gio::Menu::new();
         extra.append(Some("Paste and Go"), Some("win.paste-and-go"));
         self.entry.set_extra_menu(Some(&extra));
@@ -1220,6 +1236,11 @@ impl BrowserWindow {
         add("paste-and-go", Box::new(|w| {
             let clipboard = w.entry.clipboard();
             let w = Rc::downgrade(w);
+            // A password copied from Wisp (or a password manager) is marked
+            // secret, and is never pasted here.
+            if clipboard.formats().contain_mime_type("x-kde-passwordManagerHint") {
+                return;
+            }
             glib::spawn_future_local(async move {
                 let Ok(Some(text)) = clipboard.read_text_future().await else { return };
                 let Some(win) = w.upgrade() else { return };
@@ -1229,7 +1250,14 @@ impl BrowserWindow {
                     return;
                 }
                 win.entry.set_text(&text);
-                win.entry.emit_activate();
+                // Text that could be a password or a key isn't sent anywhere
+                // (a DNS server, a search engine) until the person presses Enter.
+                if wisp_core::address::paste_can_go(&text) {
+                    win.entry.emit_activate();
+                } else {
+                    win.entry.grab_focus();
+                    win.entry.set_position(-1);
+                }
             });
         }));
         add("share-page", Box::new(|w| {
@@ -1284,6 +1312,8 @@ impl BrowserWindow {
         add("zoom-out", Box::new(|w| w.zoom(Some(1.0 / 1.1))));
         add("zoom-reset", Box::new(|w| w.zoom(None)));
         add("inspector", Box::new(|w| {
+            // Off until asked for (privacy.rs): from now on, for this run.
+            w.shared.settings.set_enable_developer_extras(true);
             if let Some(i) = w.current_view().and_then(|v| v.inspector()) {
                 i.show();
             }
@@ -1660,7 +1690,7 @@ impl BrowserWindow {
         let open_plugins = gtk::Button::with_label("Open plugin folder");
         let w = Rc::downgrade(self);
         open_plugins.connect_clicked(move |_| {
-            let dir = plugins::plugin_dirs().remove(0);
+            let dir = plugins::user_plugin_dir();
             let _ = std::fs::create_dir_all(&dir);
             if let Some(win) = w.upgrade() {
                 win.open_path(&dir);
@@ -2119,10 +2149,11 @@ impl BrowserWindow {
             let Some(uri) = action.request().and_then(|r| r.uri()) else { return false };
 
             // "Continue over HTTP" on the HTTPS-failure page. Any page can
-            // open a wisp:allow-http link, so it only counts when it carries
+            // open a wisp-allow-http: link, so it only counts when it carries
             // the token of the failure page this tab is showing, and was
             // clicked. The token works once, for that page's site only.
-            if let Some(token) = uri.strip_prefix("wisp:allow-http?") {
+            // (Not a wisp: link: web pages can't open those at all.)
+            if let Some(token) = uri.strip_prefix("wisp-allow-http:") {
                 decision.ignore();
                 let offer = tab.http_offer.borrow_mut().take();
                 let showing = v.uri();
@@ -3015,9 +3046,38 @@ impl BrowserWindow {
     /// Open a file or folder outside Wisp (see launch.rs). Failing that,
     /// files WebKit can show open in a tab; anything else shows its path.
     fn open_path(self: &Rc<Self>, path: &std::path::Path) {
+        // A Windows program or a Java one runs as a program here (through
+        // Wine or Java, if they're installed): asked about first.
+        if path.is_file() && crate::launch::runs_as_program(path) {
+            let dialog = gtk::AlertDialog::builder()
+                .message("Run this program?")
+                .detail(format!(
+                    "{} is a program. Opening it runs it, through Wine or Java if they're installed, with access to your files. Only run it if you trust where it came from.",
+                    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                ))
+                .buttons(["Cancel", "Run"])
+                .cancel_button(0)
+                .default_button(0)
+                .build();
+            let (w, path) = (Rc::downgrade(self), path.to_path_buf());
+            dialog.choose(Some(&self.window), None::<&gio::Cancellable>, move |res| {
+                if res == Ok(1)
+                    && let Some(win) = w.upgrade()
+                    && !crate::launch::open(&path)
+                {
+                    win.open_path_failed(&path);
+                }
+            });
+            return;
+        }
         if crate::launch::open(path) {
             return;
         }
+        self.open_path_failed(path);
+    }
+
+    /// Nothing outside Wisp could open `path`.
+    fn open_path_failed(self: &Rc<Self>, path: &std::path::Path) {
         let file = gio::File::for_path(path);
         let (mime, _) = gio::content_type_guess(Some(path), None);
         let viewable = path.is_file()
@@ -3170,8 +3230,8 @@ impl BrowserWindow {
                         cfg.approved_plugins.insert(id.clone(), manifest.declaration_key());
                         cfg.save();
                     }
-                    // A built-in plugin keeps its id unless you choose otherwise.
-                    let builtin = win.shared.plugins.get(&id).filter(|p| p.built_in);
+                    // A built-in plugin keeps its id: this one won't be used.
+                    let builtin = win.shared.plugins.plugins.iter().find(|p| p.built_in && plugins::same_id(&p.manifest.id, &id)).cloned();
                     Ok(builtin.map(|p| p.manifest.name.clone()))
                 })();
                 let name = &manifest.name;
@@ -3180,7 +3240,7 @@ impl BrowserWindow {
                     Ok(None) => (format!("Installed {name}"), restart.to_string()),
                     Ok(Some(builtin)) => (
                         format!("Installed {name}"),
-                        format!("{restart} It has the same id as the built-in {builtin} plugin, so Wisp will ask whether to use it instead."),
+                        format!("It has the same id as the built-in {builtin} plugin, so it won't be used. Give it an id of its own in its plugin.json."),
                     ),
                     Err(e) => ("Couldn't install the plugin".to_string(), e),
                 };
@@ -3509,7 +3569,7 @@ fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-/// Whether a `wisp:allow-http?<token>` link may use `offer`: it has the
+/// Whether a `wisp-allow-http:<token>` link may use `offer`: it has the
 /// failure page's token, came from a click, and the tab still shows that
 /// page.
 fn continue_over_http(offer: &HttpOffer, token: &str, clicked: bool, showing: Option<&str>) -> bool {
@@ -3524,7 +3584,7 @@ fn random_token() -> String {
 }
 
 fn https_failed_page(http_uri: &str, reason: &str, token: &str) -> String {
-    let allow = format!("wisp:allow-http?{token}");
+    let allow = format!("wisp-allow-http:{token}");
     format!(
         r#"<!doctype html><title>Secure connection failed</title>
 <style>body{{font-family:sans-serif;max-width:40em;margin:4em auto;padding:0 1em;line-height:1.5}}

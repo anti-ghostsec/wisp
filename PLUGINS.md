@@ -4,14 +4,16 @@ A plugin is a folder with a `plugin.json` manifest and the files it references.
 Install one with ☰ → **Install plugin…** (pick the plugin's folder), or by
 copying its folder into `~/.local/share/wisp/plugins/`; then restart Wisp
 and toggle it from the menu (☰). Wisp also loads plugins from `$WISP_PLUGIN_PATH`
-(colon-separated), `/usr/share/wisp/plugins` and the `plugins/` folder of the
-source tree.
+(colon-separated).
 
-Built-in plugins (those folders) come first. A plugin of your own with a
-built-in plugin's id (`passwords`, say) would get everything that plugin has,
-its saved data included, so it is left out: Wisp says so when it starts and
-offers **Use Mine Instead** (remembered in `plugin_overrides` in
-`config.json`; it takes effect from the next start).
+Built-in plugins are the ones Wisp comes with: the `plugins/` folder next to
+the `wisp` program (as the release archive has it), `/usr/share/wisp/plugins`
+and `/usr/local/share/wisp/plugins`, and the source tree's `plugins/` in a
+debug build. They come first, and always win: a plugin of your own (or one
+from `$WISP_PLUGIN_PATH`) with a built-in plugin's id (`passwords`, say)
+would get everything that plugin has, its saved data included, so it is
+left out, and Wisp says so when it starts. Ids that differ only in case or
+in `-` and `_` (`element-blocker`, `Element_Blocker`) count as the same.
 
 Plugins of your own (from your plugins folder or `$WISP_PLUGIN_PATH`) aren't
 checked by anyone, so none runs until you've seen what it declares and said

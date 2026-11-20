@@ -13,11 +13,13 @@
 //! changed (so nothing on disk is overwritten while it can't be read).
 
 use crate::config;
-use crate::sync::{Account, decrypt, encrypt};
+use crate::sync::{Account, decrypt, decrypt_aad, encrypt, encrypt_aad};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value as Json, json};
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -114,11 +116,22 @@ struct Secrets {
     key: String,
     #[serde(default)]
     sync: Option<Account>,
+    /// The data key from before the password was last changed, kept only
+    /// until every file is sealed with the new one (`rekey`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_key: Option<String>,
+    /// The version each data file was last written at, by its name in the
+    /// data folder: an older copy put back in its place is refused.
+    #[serde(default)]
+    versions: BTreeMap<String, u64>,
 }
 
 impl Drop for Secrets {
     fn drop(&mut self) {
         wipe_string(&mut self.key);
+        if let Some(k) = &mut self.previous_key {
+            wipe_string(k);
+        }
         if let Some(account) = &mut self.sync {
             wipe_string(&mut account.password);
         }
@@ -336,6 +349,7 @@ impl Vault {
             && let Ok(secrets) = unseal(&kek, &s.secrets)
         {
             *self.open.borrow_mut() = Some((secrets, kek));
+            self.rekey();
         }
     }
 
@@ -390,6 +404,7 @@ impl Vault {
         let secrets = unseal(&kek, &s.secrets).map_err(|_| "Wrong password.".to_string())?;
         *self.open.borrow_mut() = Some((secrets, kek));
         remember_protection(true);
+        self.rekey();
         Ok(())
     }
 
@@ -406,7 +421,7 @@ impl Vault {
             None => random_key()?,
         };
         let sync = fs::read_to_string(legacy_sync_path()).ok().and_then(|t| serde_json::from_str::<Account>(&t).ok());
-        let secrets = Secrets { key: B64.encode(key.0), sync };
+        let secrets = Secrets { key: B64.encode(key.0), sync, previous_key: None, versions: BTreeMap::new() };
         let protected = password.is_some();
         let (mut header, kek) = new_seal(password).await?;
         header.secrets = seal(&kek, &secrets)?;
@@ -415,17 +430,25 @@ impl Vault {
         *self.sealed.borrow_mut() = Some(header);
         *self.open.borrow_mut() = Some((secrets, kek));
         remember_protection(protected);
-        seal_plugin_data(&key.0);
+        self.seal_plain_plugin_data();
         wipe(&legacy_key_path());
         wipe(&legacy_sync_path());
         Ok(())
     }
 
-    /// A new password (or none). Only while unlocked.
+    /// A new password (or none). Only while unlocked. It comes with a new
+    /// data key too, and everything kept is sealed again with it: someone
+    /// who knew the old password, or kept a copy of the old vault file,
+    /// can't read what's kept from now on.
     pub async fn set_password(&self, password: Option<String>) -> Result<(), String> {
-        let secrets = self.open.borrow().as_ref().map(|(s, _)| s.clone()).ok_or(LOCKED)?;
+        let mut secrets = self.open.borrow().as_ref().map(|(s, _)| s.clone()).ok_or(LOCKED)?;
         let protected = password.is_some();
         let (mut header, kek) = new_seal(password).await?;
+        // A change left half done keeps the key from before that one.
+        if secrets.previous_key.is_none() {
+            secrets.previous_key = Some(secrets.key.clone());
+        }
+        secrets.key = B64.encode(random_key()?.0);
         header.secrets = seal(&kek, &secrets)?;
         // Before the file changes: if Wisp stops in between, a vault with a
         // password and a note saying "none" is no trouble, the other way
@@ -438,7 +461,107 @@ impl Vault {
         *self.sealed.borrow_mut() = Some(header);
         *self.open.borrow_mut() = Some((secrets, kek));
         remember_protection(protected);
+        self.rekey();
         Ok(())
+    }
+
+    /// Seal `text` with the data key for the file at `path`, and write it
+    /// there (as `{"sealed": ...}` when `wrapped`). The file's name and a
+    /// new version are bound to it, so it can't be passed off as another
+    /// file, or as an older copy of itself.
+    pub fn write_sealed(&self, path: &Path, text: &str, wrapped: bool) -> Result<(), String> {
+        self.write_version(path, text, wrapped)?;
+        self.save()
+    }
+
+    /// `write_sealed` without saving the vault after.
+    fn write_version(&self, path: &Path, text: &str, wrapped: bool) -> Result<(), String> {
+        let name = data_name(path);
+        let (key, version) = {
+            let open = self.open.borrow();
+            let (s, _) = open.as_ref().ok_or(LOCKED)?;
+            (decode_key(&s.key).ok_or("the vault is damaged")?, s.versions.get(&name).copied().unwrap_or(0) + 1)
+        };
+        let blob = seal_data(&key, &name, version, text)?;
+        let body = if wrapped { json!({ "sealed": blob }).to_string() } else { blob };
+        write_private(path, &body).map_err(|e| e.to_string())?;
+        // Only once the file is written: if Wisp stops in between, the
+        // file is newer than the vault says, which is let through.
+        if let Some((s, _)) = self.open.borrow_mut().as_mut() {
+            s.versions.insert(name, version);
+        }
+        Ok(())
+    }
+
+    /// What `write_sealed` wrote. None while locked, if it's damaged or for
+    /// another file, or if it's older than the last version written (a
+    /// copy from before put back).
+    pub fn read_sealed(&self, path: &Path, wrapped: bool) -> Option<String> {
+        let text = fs::read_to_string(path).ok()?;
+        let blob = if wrapped { serde_json::from_str::<Json>(&text).ok()?.get("sealed")?.as_str()?.to_string() } else { text };
+        let name = data_name(path);
+        let open = self.open.borrow();
+        let (s, _) = open.as_ref()?;
+        let keys: Vec<[u8; 32]> = [Some(&s.key), s.previous_key.as_ref()].into_iter().flatten().filter_map(|k| decode_key(k)).collect();
+        match open_data(&keys, &name, s.versions.get(&name).copied(), &blob) {
+            Ok(text) => Some(text),
+            Err(e) => {
+                eprintln!("wisp: not reading {}: {e}", path.display());
+                None
+            }
+        }
+    }
+
+    /// After a password change: every data file sealed again with the new
+    /// data key, then the old one forgotten. Run again on the next start if
+    /// Wisp stopped before it was done.
+    fn rekey(&self) {
+        if self.open.borrow().as_ref().is_none_or(|(s, _)| s.previous_key.is_none()) {
+            return;
+        }
+        for (path, wrapped) in data_files() {
+            if !path.exists() {
+                continue;
+            }
+            let plain = if !wrapped && fs::read_to_string(&path).is_ok_and(|t| is_plain_json(&t)) {
+                fs::read_to_string(&path).ok()
+            } else {
+                self.read_sealed(&path, wrapped)
+            };
+            let Some(mut text) = plain else {
+                eprintln!("wisp: {} can't be read, so it's left as it is", path.display());
+                continue;
+            };
+            let written = self.write_version(&path, &text, wrapped);
+            wipe_string(&mut text);
+            if let Err(e) = written {
+                // The old key stays until it's done; the next start tries again.
+                eprintln!("wisp: cannot seal {} again: {e}", path.display());
+                let _ = self.save();
+                return;
+            }
+        }
+        if let Some((s, _)) = self.open.borrow_mut().as_mut()
+            && let Some(mut old) = s.previous_key.take()
+        {
+            wipe_string(&mut old);
+        }
+        if let Err(e) = self.save() {
+            eprintln!("wisp: {e}");
+        }
+    }
+
+    /// Plugin data left unencrypted by older Wisps, encrypted in place.
+    fn seal_plain_plugin_data(&self) {
+        for (path, _) in data_files().into_iter().filter(|(p, _)| p.starts_with(plugin_data_dir())) {
+            let Ok(text) = fs::read_to_string(&path) else { continue };
+            if is_plain_json(&text) {
+                // A new file in its place (the rename), then the old one's
+                // contents are gone with it.
+                let _ = self.write_version(&path, &text, false);
+            }
+        }
+        let _ = self.save();
     }
 
     fn save(&self) -> Result<(), String> {
@@ -466,24 +589,62 @@ fn unseal(kek: &Key, blob: &str) -> Result<Secrets, String> {
     secrets
 }
 
-/// Plugin data left unencrypted by older Wisps, encrypted in place.
-fn seal_plugin_data(key: &[u8; 32]) {
-    let Ok(dir) = fs::read_dir(plugin_data_dir()) else { return };
-    for entry in dir.flatten() {
-        let path = entry.path();
-        if path.extension().is_none_or(|e| e != "json") {
-            continue;
+/// What a data file sealed by `write_sealed` holds: `wisp2:`, the version,
+/// `:`, then the sealed text. Older Wisps wrote the sealed text alone.
+const DATA_PREFIX: &str = "wisp2:";
+
+/// A data file's name as bound to what it holds: its path in the data folder.
+fn data_name(path: &Path) -> String {
+    path.strip_prefix(config::data_dir()).unwrap_or(path).to_string_lossy().into_owned()
+}
+
+/// What's bound to a data file's sealed text besides the key.
+fn data_aad(name: &str, version: u64) -> Vec<u8> {
+    format!("wisp data 2\0{name}\0{version}").into_bytes()
+}
+
+fn seal_data(key: &[u8; 32], name: &str, version: u64, text: &str) -> Result<String, String> {
+    Ok(format!("{DATA_PREFIX}{version}:{}", encrypt_aad(key, text, &data_aad(name, version))?))
+}
+
+/// The text of a data file named `name`, with the first of `keys` that
+/// opens it. `last` is the version last written: an older one is refused,
+/// and so is one in the old format once a versioned one was written.
+fn open_data(keys: &[[u8; 32]], name: &str, last: Option<u64>, blob: &str) -> Result<String, String> {
+    let blob = blob.trim();
+    match blob.strip_prefix(DATA_PREFIX) {
+        Some(rest) => {
+            let (version, sealed) = rest.split_once(':').ok_or("damaged")?;
+            let version: u64 = version.parse().map_err(|_| "damaged")?;
+            if last.is_some_and(|last| version < last) {
+                return Err(format!("it's version {version}, older than the last one written ({}): a copy from before?", last.unwrap_or(0)));
+            }
+            keys.iter()
+                .find_map(|k| decrypt_aad(k, sealed, &data_aad(name, version)).ok())
+                .ok_or_else(|| "it can't be opened with this vault's key, or it's another file's".to_string())
         }
-        let Ok(text) = fs::read_to_string(&path) else { continue };
-        if !is_plain_json(&text) {
-            continue;
-        }
-        if let Ok(blob) = encrypt(key, &text) {
-            // A new file in its place (the rename), then the old one's
-            // contents are gone with it.
-            let _ = write_private(&path, &blob);
-        }
+        // From before files had versions: read as it is, and written with
+        // one the next time.
+        None if last.is_some() => Err("it's in the old format, though a newer one was written".into()),
+        None => keys.iter().find_map(|k| decrypt(k, blob).ok()).ok_or_else(|| "it can't be opened with this vault's key".to_string()),
     }
+}
+
+/// Every file sealed with the data key, and whether it's `{"sealed": ...}`.
+fn data_files() -> Vec<(PathBuf, bool)> {
+    let mut files = vec![
+        (crate::state::history_path(), false),
+        (crate::state::session_path(), false),
+        (crate::sync::local_path(), true),
+        (crate::sync::cache_path(), true),
+    ];
+    if let Ok(dir) = fs::read_dir(plugin_data_dir()) {
+        let mut plugin: Vec<PathBuf> =
+            dir.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "json")).collect();
+        plugin.sort();
+        files.extend(plugin.into_iter().map(|p| (p, false)));
+    }
+    files
 }
 
 /// Plugin data from before it was encrypted is JSON as it is; encrypted
@@ -551,6 +712,8 @@ mod tests {
         let secrets = Secrets {
             key: B64.encode([7u8; 32]),
             sync: Some(Account { service: "https://example.org".into(), id: "abc".into(), password: "hunter2".into() }),
+            previous_key: None,
+            versions: BTreeMap::new(),
         };
         let blob = seal(&kek, &secrets).unwrap();
         assert!(!blob.contains("hunter2") && !blob.contains("abc"));
@@ -567,6 +730,94 @@ mod tests {
         let c = argon2("pw", b"SALTSALTSALTSALT", SMALL, 1, 1).unwrap();
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn data_is_bound_to_its_file_and_version() {
+        let key = [3u8; 32];
+        let blob = seal_data(&key, "history.enc", 5, "[1,2]").unwrap();
+        assert!(blob.starts_with("wisp2:5:"));
+        assert_eq!(open_data(&[key], "history.enc", Some(5), &blob).unwrap(), "[1,2]");
+        // Newer than the vault says (Wisp stopped before saving it): fine.
+        assert_eq!(open_data(&[key], "history.enc", Some(4), &blob).unwrap(), "[1,2]");
+        // Passed off as another file, or with its version changed.
+        assert!(open_data(&[key], "session.enc", Some(5), &blob).is_err());
+        let bumped = blob.replacen("wisp2:5:", "wisp2:9:", 1);
+        assert!(open_data(&[key], "history.enc", Some(5), &bumped).is_err());
+        // An older copy put back.
+        assert!(open_data(&[key], "history.enc", Some(6), &blob).is_err());
+        // Another key.
+        assert!(open_data(&[[4u8; 32]], "history.enc", Some(5), &blob).is_err());
+    }
+
+    #[test]
+    fn old_format_is_read_until_a_versioned_one_is_written() {
+        let key = [3u8; 32];
+        let old = encrypt(&key, "[1]").unwrap();
+        assert_eq!(open_data(&[key], "history.enc", None, &old).unwrap(), "[1]");
+        assert!(open_data(&[key], "history.enc", Some(1), &old).is_err());
+    }
+
+    #[test]
+    fn data_from_before_a_password_change_opens_with_the_previous_key() {
+        let (new, old) = ([5u8; 32], [6u8; 32]);
+        let blob = seal_data(&old, "plugin-data/passwords.json", 2, "{}").unwrap();
+        assert!(open_data(&[new], "plugin-data/passwords.json", Some(2), &blob).is_err());
+        assert_eq!(open_data(&[new, old], "plugin-data/passwords.json", Some(2), &blob).unwrap(), "{}");
+    }
+
+    #[test]
+    fn old_vaults_still_read() {
+        let kek = argon2("pw", b"0123456789abcdef", SMALL, 1, 1).unwrap();
+        let blob = encrypt(&kek.0, &format!("{{\"key\":\"{}\"}}", B64.encode([7u8; 32]))).unwrap();
+        let back = unseal(&kek, &blob).unwrap();
+        assert!(back.versions.is_empty() && back.previous_key.is_none());
+        assert_eq!(decode_key(&back.key), Some([7u8; 32]));
+    }
+
+    /// Runs a future that never waits (nothing here needs a runtime).
+    fn now<T>(f: impl std::future::Future<Output = T>) -> T {
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        let mut f = std::pin::pin!(f);
+        match f.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(v) => v,
+            std::task::Poll::Pending => panic!("it waited"),
+        }
+    }
+
+    #[test]
+    fn a_password_change_seals_everything_again_with_a_new_key() {
+        let root = std::env::temp_dir().join(format!("wisp-vault-rekey-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        config::set_dirs(config::Dirs { config: root.join("config"), data: root.join("data"), cache: root.join("cache") });
+        // Never near the real folders, should another test have set them first.
+        if config::data_dir() != root.join("data") {
+            return;
+        }
+        let vault = Vault { sealed: RefCell::new(None), open: RefCell::new(None), downgraded: Cell::new(false) };
+        now(vault.create(None)).unwrap();
+        let history = crate::state::history_path();
+        let local = crate::sync::local_path();
+        vault.write_sealed(&history, "[\"h\"]", false).unwrap();
+        vault.write_sealed(&local, "{\"t\":1}", true).unwrap();
+        let stale = fs::read_to_string(&history).unwrap();
+        vault.write_sealed(&history, "[\"h2\"]", false).unwrap();
+        let before = vault.data_key().unwrap();
+
+        now(vault.set_password(None)).unwrap();
+        let after = vault.data_key().unwrap();
+        assert_ne!(before, after);
+        assert!(vault.open.borrow().as_ref().unwrap().0.previous_key.is_none());
+        assert_eq!(vault.read_sealed(&history, false).unwrap(), "[\"h2\"]");
+        assert_eq!(vault.read_sealed(&local, true).unwrap(), "{\"t\":1}");
+        // Sealed with the new key alone now.
+        let blob = fs::read_to_string(&history).unwrap();
+        assert!(open_data(&[before], "history.enc", None, &blob).is_err());
+        // An older copy put back is refused.
+        fs::write(&history, stale).unwrap();
+        assert!(vault.read_sealed(&history, false).is_none());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

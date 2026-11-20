@@ -107,6 +107,46 @@ pub struct PluginHost {
     /// The keys given to pages, each for one plugin in one view, and what
     /// they may reach: see `page_loaded`.
     pages: RefCell<HashMap<String, PageKey>>,
+    /// Content filters still being loaded or compiled, and what waits for
+    /// them (the first window's pages: see `when_filters_ready`).
+    filters_pending: Rc<FilterGate>,
+}
+
+/// Counts content filters on their way in; runs what waits for them once
+/// there are none left.
+type Waiter = Box<dyn FnOnce()>;
+
+#[derive(Default)]
+pub struct FilterGate {
+    pending: Cell<usize>,
+    waiting: RefCell<Vec<Waiter>>,
+}
+
+impl FilterGate {
+    /// One more filter on its way: in force when the guard is dropped.
+    pub fn hold(self: &Rc<Self>) -> FilterGuard {
+        self.pending.set(self.pending.get() + 1);
+        FilterGuard(self.clone())
+    }
+
+    fn release_all(&self) {
+        let waiting = std::mem::take(&mut *self.waiting.borrow_mut());
+        for f in waiting {
+            f();
+        }
+    }
+}
+
+pub struct FilterGuard(Rc<FilterGate>);
+
+impl Drop for FilterGuard {
+    fn drop(&mut self) {
+        let left = self.0.pending.get().saturating_sub(1);
+        self.0.pending.set(left);
+        if left == 0 {
+            self.0.release_all();
+        }
+    }
 }
 
 struct PageKey {
@@ -257,12 +297,42 @@ impl PluginHost {
             badges: RefCell::new(HashMap::new()),
             refused,
             pages: RefCell::default(),
+            filters_pending: Rc::default(),
         });
         for p in &host.plugins {
             host.register_handler(p);
         }
         host.apply();
         host
+    }
+
+    /// A filter is on its way in (Wisp's own, say): see `when_filters_ready`.
+    pub fn hold_filters(&self) -> FilterGuard {
+        self.filters_pending.hold()
+    }
+
+    /// Run `f` once the content filters (ad and tracker blocking, the
+    /// HTTPS upgrade) are in force, so no page loads before them; after 10
+    /// seconds at most, should one take that long (a list downloaded for
+    /// the first time).
+    pub fn when_filters_ready(&self, f: impl FnOnce() + 'static) {
+        if self.filters_pending.pending.get() == 0 {
+            return f();
+        }
+        // Run once: by the last filter in, or by the timeout.
+        let once: Rc<Cell<Option<Waiter>>> = Rc::new(Cell::new(Some(Box::new(f))));
+        let run = once.clone();
+        self.filters_pending.waiting.borrow_mut().push(Box::new(move || {
+            if let Some(f) = run.take() {
+                f();
+            }
+        }));
+        glib::timeout_add_local_once(Duration::from_secs(10), move || {
+            if let Some(f) = once.take() {
+                eprintln!("wisp: content filters still loading after 10 s; opening anyway");
+                f();
+            }
+        });
     }
 
     pub fn set_ui(&self, ui: Rc<dyn PluginUi>) {
@@ -619,18 +689,21 @@ impl PluginHost {
             let ident = format!("{}-{}-{:016x}", p.key(), sanitize(file), hash(&src));
             let host = Rc::downgrade(self);
             let plugin = p.clone();
+            let guard = self.hold_filters();
             glib::spawn_future_local(async move {
                 if let Some(host) = host.upgrade() {
                     host.load_or_compile(&plugin, &ident, || Some(src)).await;
                 }
+                drop(guard);
             });
         }
         for list in p.manifest.filter_lists.clone() {
             let host = Rc::downgrade(self);
             let plugin = p.clone();
+            let guard = self.hold_filters();
             glib::spawn_future_local(async move {
                 if let Some(host) = host.upgrade() {
-                    host.load_filter_list(&plugin, &list).await;
+                    host.load_filter_list(&plugin, &list, guard).await;
                 }
             });
         }
@@ -679,7 +752,10 @@ impl PluginHost {
         }
     }
 
-    async fn load_filter_list(self: &Rc<Self>, p: &Rc<Plugin>, list: &FilterList) {
+    /// `guard` is let go once the list is in force: from the cache, or
+    /// downloaded the first time.
+    async fn load_filter_list(self: &Rc<Self>, p: &Rc<Plugin>, list: &FilterList, guard: FilterGuard) {
+        let mut guard = Some(guard);
         let dir = config::cache_dir().join("filter-lists");
         let base = format!("{}-{}", p.key(), sanitize(&list.name));
         let meta_path = dir.join(format!("{base}.meta"));
@@ -692,7 +768,9 @@ impl PluginHost {
 
         if let Some(ident) = &cached {
             let json_path = dir.join(format!("{base}.json"));
-            self.load_or_compile(p, ident, || fs::read_to_string(&json_path).ok()).await;
+            if self.load_or_compile(p, ident, || fs::read_to_string(&json_path).ok()).await {
+                guard = None;
+            }
         }
         let stale = age.is_none_or(|a| a > Duration::from_secs(list.refresh_days * 86_400));
         if !stale {
@@ -722,6 +800,7 @@ impl PluginHost {
             }
             Err(e) => eprintln!("wisp: cannot download {}: {e}", list.name),
         }
+        drop(guard);
     }
 
     /// A filter list, if it's no bigger than `MAX_LIST_BYTES`: read a piece

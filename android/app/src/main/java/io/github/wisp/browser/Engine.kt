@@ -27,7 +27,10 @@ object Engine {
     private const val TAG = "wisp"
     /** The app's own settings, beside wisp-core's (config.json). */
     const val PREFS = "wisp-android"
-    /** Orbot's SOCKS port. */
+    /**
+     * Orbot's SOCKS port. Wisp can't tell Orbot from another app listening
+     * there; the built-in Tor doesn't have that problem.
+     */
     const val ORBOT_PORT = 9050
     /** Where Gecko is sent while the built-in Tor connects: nothing listens there. */
     private const val CLOSED_PORT = 9
@@ -97,7 +100,22 @@ object Engine {
             .build()
         runtime = GeckoRuntime.create(app, settings)
         web = GeckoWebExecutor(runtime)
-        applyPrefs(app)
+        // The route's settings first of all: Gecko keeps the last run's, and
+        // on Tor that's a port the last Tor had, which any app may have
+        // taken since. Until Tor is up again it's the closed port.
+        firstPrefs = applyPrefs(app)
+    }
+
+    /** The first [applyPrefs], as the engine starts. */
+    private var firstPrefs: GeckoResult<Map<String, Boolean>>? = null
+
+    /**
+     * Run [then] on the UI thread once the first settings are in force:
+     * no extension or page loads before the route is set.
+     */
+    fun afterPrefs(then: () -> Unit) {
+        val first = firstPrefs ?: return then()
+        first.accept({ main.post { then() } }, { main.post { then() } })
     }
 
     private fun cookieBehavior(cfg: JSONObject) =
@@ -136,7 +154,14 @@ object Engine {
      * Gecko's fingerprinting protection, and the route: straight out (your
      * VPN, if one is on), or through Tor (built in or Orbot's) with names
      * looked up there. On Tor, until it's connected, Gecko is pointed at a
-     * port nothing listens on: pages fail, they never go around it.
+     * port nothing listens on: pages fail, they never go around it. The
+     * built-in Tor's port is the one it reports once it's up (it picks a
+     * free one), never a set one another app could be listening on.
+     *
+     * Per-site circuits (Tor Browser gives each site its own SOCKS login,
+     * and so its own circuit) need code GeckoView doesn't have, and there's
+     * no pref for it: here all sites share Tor's circuits, rotated as Tor
+     * does. Each site's cookies and storage are still kept apart.
      */
     fun applyPrefs(context: Context): GeckoResult<Map<String, Boolean>> {
         val cfg = config
@@ -321,7 +346,11 @@ object Engine {
                     }
                     cacheMode(WebRequest.CACHE_MODE_NO_STORE)
                 }.build()
-                web.fetch(request, GeckoWebExecutor.FETCH_FLAGS_ANONYMOUS or GeckoWebExecutor.FETCH_FLAGS_PRIVATE).accept({ response ->
+                // No redirects followed: wisp-core refuses them (the sync
+                // service must answer from its own address).
+                val flags = GeckoWebExecutor.FETCH_FLAGS_ANONYMOUS or GeckoWebExecutor.FETCH_FLAGS_PRIVATE or
+                    GeckoWebExecutor.FETCH_FLAGS_NO_REDIRECTS
+                web.fetch(request, flags).accept({ response ->
                     if (response == null) return@accept done(0, ByteArray(0), "no response")
                     io.execute {
                         try {

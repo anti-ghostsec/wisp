@@ -9,16 +9,22 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Only the jobs that publish may write to the repository.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
-  linux:
+  # The build (cargo and every crate it compiles) never sees the signing
+  # key: it hands the archive to the next job, which signs and publishes it
+  # on a runner of its own and runs none of the build's code.
+  linux-build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       # Actions and the build image are named by their hash, not by a tag
       # that can be moved to other code: what builds the release that gets
@@ -35,6 +41,34 @@ jobs:
           debian:trixie@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a4791b25ea8a6
           .github/build-linux.sh dist
 
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-unsigned
+          path: |
+            dist/wisp-linux-x86_64.tar.gz
+            dist/wisp-linux-x86_64.tar.gz.sha256
+            dist/wisp-commit
+          if-no-files-found: error
+          retention-days: 1
+
+  # Signs what linux-build made with minisign (secret MINISIGN_SECRET_KEY)
+  # and publishes it as the newest release.
+  linux:
+    needs: linux-build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # For minisign.pub and the commit's time; nothing in it is run.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: linux-unsigned
+          path: dist
+
       # The trusted comment names the commit and its time, so the updater
       # can tell this build is the one it was told about, and never goes
       # back to an older one.
@@ -42,15 +76,18 @@ jobs:
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
+          set -eu
           [ -n "$MINISIGN_SECRET_KEY" ] || { echo "MINISIGN_SECRET_KEY isn't set: no release without a signature" >&2; exit 1; }
+          # The archive is the one the build summed, and names this commit.
+          (cd dist && sha256sum -c wisp-linux-x86_64.tar.gz.sha256)
+          [ "$(cat dist/wisp-commit)" = "$GITHUB_SHA" ] || { echo "the build is of another commit" >&2; exit 1; }
           sudo apt-get install -y -q minisign >/dev/null
-          # The container made dist/ as root.
-          sudo chown -R "$(id -u):$(id -g)" dist
           key=$(mktemp)
           trap 'rm -f "$key"' EXIT
           printf '%s\n' "$MINISIGN_SECRET_KEY" >"$key"
           when=$(git log -1 --format=%ct "$GITHUB_SHA")
           minisign -S -s "$key" -m dist/wisp-linux-x86_64.tar.gz -t "wisp $GITHUB_SHA $when"
+          rm -f "$key"
           # Signed with the key the updater trusts, not some other one.
           minisign -V -p minisign.pub -m dist/wisp-linux-x86_64.tar.gz
 
@@ -120,6 +157,8 @@ jobs:
     # Each APK whose build went through, even if the other's didn't.
     if: ${{ !cancelled() && needs.android.result != 'skipped' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:

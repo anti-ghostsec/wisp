@@ -69,6 +69,13 @@ pub fn resolve_address(text: String, search_url: String) -> String {
     address::resolve_input(&text, &search_url)
 }
 
+/// What another app asked Wisp to search for, as a web address to load:
+/// never anything but http(s). None if there's no usable search engine.
+#[uniffi::export]
+pub fn resolve_search(text: String, search_url: String) -> Option<String> {
+    address::resolve_search(&text, &search_url)
+}
+
 /// The sync service Wisp uses unless told otherwise.
 #[uniffi::export]
 pub fn default_sync_service() -> String {

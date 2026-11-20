@@ -19,8 +19,10 @@ fn memory_settings(cfg: &Config) -> Option<MemoryPressureSettings> {
     // in one process, a page of big pictures got there at once, and the
     // decoded pictures were dropped and decoded again while scrolling
     // (jumpy, and slow to show). Never kill a process just for being big.
-    s.set_conservative_threshold(0.6);
+    // Strict first: WebKit refuses a conservative threshold that isn't
+    // below the strict one already set (its default is 0.5).
     s.set_strict_threshold(0.85);
+    s.set_conservative_threshold(0.6);
     Some(s)
 }
 
@@ -81,7 +83,28 @@ pub fn settings(cfg: &Config) -> Settings {
     s.set_javascript_can_open_windows_automatically(false);
     s.set_javascript_can_access_clipboard(false);
     s.set_media_playback_requires_user_gesture(true);
-    s.set_enable_developer_extras(true);
+    // The inspector (and "Inspect Element") only once it's asked for with
+    // Ctrl+Shift+I or F12, which turns it on for the rest of the run.
+    s.set_enable_developer_extras(false);
+    // WebKit's fixes for particular sites, some of which tell those sites
+    // a different browser: off, so every site sees the same Wisp.
+    s.set_enable_site_specific_quirks(false);
+    // Nothing looked up or connected to before it's used: names in links,
+    // <link rel=prefetch> and preconnect hints, speculation rules.
+    #[allow(deprecated)]
+    s.set_enable_dns_prefetching(false);
+    if let Some(features) = Settings::all_features() {
+        for i in 0..features.length() {
+            let Some(f) = features.get(i) else { continue };
+            let id = f.identifier().map(|g| g.to_string()).unwrap_or_default();
+            if ["DNSPrefetchingEnabled", "LinkPrefetchEnabled", "LinkPreconnectEarlyHintsEnabled", "SpeculationRulesPrefetchEnabled"]
+                .contains(&id.as_str())
+            {
+                s.set_feature_enabled(&f, false);
+            }
+        }
+    }
+    // Web Audio stays on: games, calls and some players need it.
     if let Some(ua) = &cfg.user_agent {
         s.set_user_agent(Some(ua));
     }

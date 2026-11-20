@@ -41,6 +41,26 @@ fn open_file(path: &Path) -> bool {
         && (any_app_for("text/plain", &file) || EDITORS.iter().any(|ed| spawn(&[OsStr::new(ed), path.as_os_str()])))
 }
 
+/// Files that run as programs when opened: Windows ones (through Wine)
+/// and Java ones.
+pub fn runs_as_program(path: &Path) -> bool {
+    const EXTENSIONS: &[&str] = &[
+        "exe", "msi", "msp", "com", "bat", "cmd", "scr", "pif", "cpl", "lnk", "vbs", "vbe", "wsf", "wsh",
+        "ps1", "hta", "reg", "jar", "jnlp", "appref-ms",
+    ];
+    const TYPES: &[&str] = &[
+        "application/x-ms-dos-executable", "application/x-msdownload", "application/x-msi", "application/x-ms-shortcut",
+        "application/x-msdos-program", "application/x-bat", "application/x-java-archive", "application/x-java-jnlp-file",
+        "application/vnd.microsoft.portable-executable",
+    ];
+    let ext = path.extension().and_then(OsStr::to_str).map(str::to_ascii_lowercase);
+    if ext.as_deref().is_some_and(|e| EXTENSIONS.contains(&e)) {
+        return true;
+    }
+    let (mime, _) = gio::content_type_guess(Some(path), None);
+    TYPES.contains(&mime.as_str())
+}
+
 pub fn is_text(mime: &str) -> bool {
     mime.starts_with("text/") || ["application/json", "application/xml", "application/javascript", "application/x-shellscript"].contains(&mime)
 }
@@ -163,6 +183,15 @@ fn spawn(argv: &[&OsStr]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn programs_are_told_apart() {
+        assert!(runs_as_program(Path::new("/tmp/setup.EXE")));
+        assert!(runs_as_program(Path::new("/tmp/app.jar")));
+        assert!(runs_as_program(Path::new("/tmp/x.msi")));
+        assert!(!runs_as_program(Path::new("/tmp/photo.png")));
+        assert!(!runs_as_program(Path::new("/tmp/notes.txt")));
+    }
 
     #[test]
     fn association_lines() {

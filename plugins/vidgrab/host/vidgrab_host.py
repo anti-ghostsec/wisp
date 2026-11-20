@@ -7,8 +7,8 @@ WebExtension native messaging protocol (4-byte little-endian length prefix +
 UTF-8 JSON).
 """
 
-import configparser
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -110,68 +110,32 @@ def find_js_runtime():
     return None
 
 
-# Where LibreWolf keeps profiles.ini (newest layout first).
-PROFILE_ROOTS = [
-    "~/.config/librewolf/librewolf",
-    "~/.librewolf",
-    "~/.var/app/io.gitlab.librewolf-community/.librewolf",
-    "~/.config/mozilla/firefox",
-    "~/.mozilla/firefox",
-]
-
-
-def running_profile():
-    """The profile of the browser that launched us: it keeps cookies.sqlite open."""
-    pid = os.getppid()
-    for _ in range(4):
-        if pid <= 1:
-            break
-        try:
-            for fd in os.listdir(f"/proc/{pid}/fd"):
-                try:
-                    target = os.readlink(f"/proc/{pid}/fd/{fd}")
-                except OSError:
-                    continue
-                if target.endswith("/cookies.sqlite"):
-                    return os.path.dirname(target)
-            with open(f"/proc/{pid}/stat") as f:
-                pid = int(f.read().rsplit(")", 1)[1].split()[1])
-        except (OSError, ValueError, IndexError):
-            break
-    return None
-
-
-def default_profile():
-    for root in PROFILE_ROOTS:
-        root = os.path.expanduser(root)
-        ini = configparser.ConfigParser()
-        if not ini.read(os.path.join(root, "profiles.ini")):
-            continue
-        paths = [ini[s]["Default"] for s in ini.sections() if s.startswith("Install") and "Default" in ini[s]]
-        for sec in ini.sections():
-            if sec.startswith("Profile") and ini[sec].get("Default") == "1":
-                paths.append(ini[sec]["Path"])
-        paths += [ini[s]["Path"] for s in ini.sections() if s.startswith("Profile") and "Path" in ini[s]]
-        for path in paths:
-            full = path if os.path.isabs(path) else os.path.join(root, path)
-            if os.path.isfile(os.path.join(full, "cookies.sqlite")):
-                return full
-    return None
-
-
-def browser_profile():
-    return running_profile() or default_profile()
-
-
 def cookie_args(opts):
-    # Cookies the browser handed over (Wisp keeps its cookies in memory).
+    # Only the cookies Wisp handed over for this site (Wisp keeps its
+    # cookies in memory), never another browser's.
     if opts.get("cookiesFile"):
         return ["--cookies", opts["cookiesFile"]]
-    manual = (opts.get("cookiesFromBrowser") or "").strip()
-    if manual:
-        return ["--cookies-from-browser", os.path.expanduser(manual)]
-    profile = browser_profile()
-    return ["--cookies-from-browser", f"firefox:{profile}"] if profile else []
+    return []
+
+
+def https_url(url):
+    """The address as yt-dlp may fetch it: https:// (http:// is upgraded, as
+    Wisp's HTTPS-only does), plain http:// only for this computer and the
+    local network; None for anything else."""
+    url = str(url or "")
+    if url.startswith("https://"):
+        return url
+    if not url.startswith("http://"):
+        return None
+    host = re.sub(r"^[^@/]*@", "", url[len("http://"):]).split("/")[0].split("?")[0].split("#")[0]
+    host = host.rsplit(":", 1)[0] if not host.startswith("[") else host.split("]")[0] + "]"
+    host = host.lower()
+    try:
+        ip = ipaddress.ip_address(host.strip("[]"))
+        local = ip.is_private or ip.is_loopback or ip.is_link_local
+    except ValueError:
+        local = host == "localhost" or host.endswith((".localhost", ".local", ".test"))
+    return url if local else "https://" + url[len("http://"):]
 
 
 def env_with_paths():
@@ -345,7 +309,6 @@ def handle_status(msg):
         "ytdlpPath": None,
         "ffmpeg": shutil.which("ffmpeg", path=search_path()),
         "jsRuntime": (find_js_runtime() or (None, None))[1],
-        "profile": browser_profile(),
         "defaultDir": default_download_dir(),
     }
     if ytdlp:
@@ -552,31 +515,55 @@ EXTRACTOR_BROKEN = re.compile(r"Unable to extract|please report this issue|No vi
 
 
 def save_cookies(text):
-    """Write cookies.txt text to a private temporary file; returns its path."""
-    folder = os.environ.get("XDG_RUNTIME_DIR") or None
-    fd, path = tempfile.mkstemp(prefix="vidgrab-cookies-", suffix=".txt", dir=folder)
+    """Write cookies.txt text to a file in a folder of its own (0700) in
+    the runtime folder, which is in memory and yours alone; returns its
+    path. None without a runtime folder: the cookies are then left out,
+    never written to /tmp or the disk."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if not runtime or not os.path.isabs(runtime) or not os.path.isdir(runtime):
+        return None
+    folder = tempfile.mkdtemp(prefix="vidgrab-", dir=runtime)
+    path = os.path.join(folder, "cookies.txt")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(text)
     return path
+
+
+def forget_cookies(path):
+    try:
+        os.remove(path)
+        os.rmdir(os.path.dirname(path))
+    except OSError:
+        pass
 
 
 def handle_download(msg):
     job_id = msg["id"]
     # Only the host names a cookies file (and deletes it afterwards).
     msg.setdefault("options", {}).pop("cookiesFile", None)
-    if msg.get("cookies"):
-        msg.setdefault("options", {})["cookiesFile"] = save_cookies(msg["cookies"])
+    url = https_url(msg.get("url"))
+    if not url:
+        send({"type": "job", "id": job_id, "state": "error", "error": "Only web addresses (https://) can be downloaded."})
+        return
+    msg["url"] = url
     ytdlp = find_ytdlp(msg.get("options", {}).get("ytdlpPath"))
     if not ytdlp:
         send({"type": "job", "id": job_id, "state": "error", "error": "yt-dlp not found. Run install.sh --fetch-ytdlp."})
         return
+    if msg.get("cookies"):
+        cookies = save_cookies(msg["cookies"])
+        if cookies:
+            msg["options"]["cookiesFile"] = cookies
     try:
         cmd, out_dir = build_download_cmd(ytdlp, msg)
     except Exception as e:  # noqa: BLE001
+        if msg["options"].get("cookiesFile"):
+            forget_cookies(msg["options"]["cookiesFile"])
         send({"type": "job", "id": job_id, "state": "error", "error": str(e)})
         return
     send({"type": "job", "id": job_id, "state": "running", "dir": out_dir})
-    subs = [s for s in msg.get("subtitles") or [] if str(s.get("url", "")).startswith(("https://", "http://"))][:20]
+    subs = [dict(s, url=https_url(s.get("url"))) for s in msg.get("subtitles") or [] if https_url(s.get("url"))][:20]
     threading.Thread(target=run_job_then_forget_cookies, args=(job_id, cmd, msg.get("options", {}), subs, msg), daemon=True).start()
 
 
@@ -585,10 +572,7 @@ def run_job_then_forget_cookies(job_id, cmd, opts, subs=(), msg=None):
         run_job(job_id, cmd, opts, subs, msg or {})
     finally:
         if opts.get("cookiesFile"):
-            try:
-                os.remove(opts["cookiesFile"])
-            except OSError:
-                pass
+            forget_cookies(opts["cookiesFile"])
 
 
 def is_failure(code):

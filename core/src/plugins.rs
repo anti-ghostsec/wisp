@@ -584,11 +584,10 @@ impl Api {
         if text.len() > 1 << 20 {
             return Err("plugin storage quota (1 MB) exceeded".into());
         }
-        if let (true, Some(key)) = (persist, key) {
+        if persist {
             // Encrypted with the vault's key: which sites you never save
             // passwords for, which login you used last, ...
-            let blob = crate::sync::encrypt(&key, &text)?;
-            vault::write_private(&Self::storage_path(p), &blob).map_err(|e| e.to_string())?;
+            vault::get().write_sealed(&Self::storage_path(p), &text, false)?;
         }
         *m = updated;
         Ok(())
@@ -600,25 +599,46 @@ pub fn user_plugin_dir() -> PathBuf {
     config::data_dir().join("plugins")
 }
 
-/// Directories searched for plugins, in priority order (first id wins).
-/// Built-in plugins come first: a plugin of your own with the same id (one
-/// called "passwords", say) doesn't replace one silently, only when you've
-/// chosen to use it instead (`plugin_overrides`).
-pub fn plugin_dirs() -> Vec<PathBuf> {
+/// Where the plugins Wisp comes with are, searched first: the host's own
+/// folder (Android), `plugins` next to the program (as the release archive
+/// has it), the system's share folders, and the source tree only in a debug
+/// build. Nothing else counts as built-in.
+pub fn built_in_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(dir) = BUILT_IN.get() {
         dirs.push(dir.clone());
     }
-    if let Ok(extra) = std::env::var("WISP_PLUGIN_PATH") {
-        dirs.extend(std::env::split_paths(&extra));
-    }
     #[cfg(not(target_os = "android"))]
     {
+        if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("plugins"))) {
+            dirs.push(dir);
+        }
         dirs.push(PathBuf::from("/usr/share/wisp/plugins"));
-        // Bundled plugins when running from the source tree.
-        dirs.push(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../plugins")));
+        dirs.push(PathBuf::from("/usr/local/share/wisp/plugins"));
+        if cfg!(debug_assertions) {
+            dirs.push(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../plugins")));
+        }
+    }
+    dirs
+}
+
+/// Folders of plugins that didn't come with Wisp: those in WISP_PLUGIN_PATH,
+/// then your own plugins folder. They run once you've allowed what they
+/// declare, and never in place of a built-in one.
+pub fn own_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(extra) = std::env::var("WISP_PLUGIN_PATH") {
+        dirs.extend(std::env::split_paths(&extra).filter(|d| !d.as_os_str().is_empty()));
     }
     dirs.push(user_plugin_dir());
+    dirs
+}
+
+/// Directories searched for plugins, in priority order (first id wins):
+/// the built-in ones, then the others.
+pub fn plugin_dirs() -> Vec<PathBuf> {
+    let mut dirs = built_in_dirs();
+    dirs.extend(own_dirs());
     dirs
 }
 
@@ -630,26 +650,33 @@ pub fn set_built_in_dir(dir: PathBuf) {
     let _ = BUILT_IN.set(dir);
 }
 
-/// The plugins found, and your own ones left out for having a built-in
-/// plugin's id.
+/// Whether two plugin ids are taken as the same: they'd share a storage
+/// file, a script world and a message handler. Case and the marks between
+/// words ("element-blocker", "Element_Blocker") don't count.
+pub fn same_id(a: &str, b: &str) -> bool {
+    sanitize(a).eq_ignore_ascii_case(&sanitize(b))
+}
+
+/// The plugins found, and the other ones left out for having a built-in
+/// plugin's id (the built-in one is always used).
 pub fn discover(cfg: &Config) -> (Vec<Rc<Plugin>>, Vec<(String, PathBuf)>) {
     let mut found: Vec<Rc<Plugin>> = Vec::new();
     let mut shadowed = Vec::new();
-    let user_dir = user_plugin_dir();
-    // Plugins from these weren't shipped with Wisp: they run once you've
-    // allowed what they declare.
-    let mut own_dirs = vec![user_dir.clone()];
-    if let Ok(extra) = std::env::var("WISP_PLUGIN_PATH") {
-        own_dirs.extend(std::env::split_paths(&extra));
-    }
     let plugin = |manifest: Manifest, path: PathBuf, built_in: bool| {
         let trusted = built_in || cfg.approved_plugins.get(&manifest.id) == Some(&manifest.declaration_key());
         let enabled = trusted && cfg.plugins.get(&manifest.id).copied().unwrap_or(manifest.enabled_by_default);
         Rc::new(Plugin { manifest, dir: path, enabled: Cell::new(enabled), trusted: Cell::new(trusted), built_in })
     };
-    for dir in plugin_dirs() {
-        let built_in = !own_dirs.contains(&dir);
-        let Ok(entries) = fs::read_dir(&dir) else { continue };
+    let built_in_dirs = built_in_dirs();
+    let own_dirs = own_dirs();
+    let dirs = built_in_dirs.iter().map(|d| (d, true)).chain(own_dirs.iter().filter(|d| !built_in_dirs.contains(d)).map(|d| (d, false)));
+    let mut seen_dirs = Vec::new();
+    for (dir, built_in) in dirs {
+        if seen_dirs.contains(dir) {
+            continue;
+        }
+        seen_dirs.push(dir.clone());
+        let Ok(entries) = fs::read_dir(dir) else { continue };
         let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
         entries.sort();
         for path in entries {
@@ -662,13 +689,11 @@ pub fn discover(cfg: &Config) -> (Vec<Rc<Plugin>>, Vec<(String, PathBuf)>) {
                     continue;
                 }
             };
-            if let Some(i) = found.iter().position(|p| p.manifest.id == manifest.id) {
-                if dir == user_dir && found[i].dir != path {
-                    if cfg.plugin_overrides.contains(&manifest.id) {
-                        found[i] = plugin(manifest, path, false);
-                    } else {
-                        eprintln!("wisp: {} has the id of a built-in plugin; using the built-in one", path.display());
-                        shadowed.push((manifest.id, path));
+            if let Some(other) = found.iter().find(|p| same_id(&p.manifest.id, &manifest.id)) {
+                if other.dir != path {
+                    eprintln!("wisp: {} has the id of {}; using that one", path.display(), other.dir.display());
+                    if other.built_in && !built_in {
+                        shadowed.push((other.manifest.id.clone(), path));
                     }
                 }
                 continue;
@@ -765,7 +790,7 @@ fn load_map(path: &Path) -> Map<String, Json> {
     let text = if vault::is_plain_json(&text) {
         text
     } else {
-        match vault::get().data_key().and_then(|k| crate::sync::decrypt(&k, &text).ok()) {
+        match vault::get().read_sealed(path, false) {
             Some(t) => t,
             None => return Map::new(),
         }
@@ -810,6 +835,13 @@ pub fn mime_for(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ids_that_differ_only_in_case_or_marks_are_the_same() {
+        assert!(same_id("element-blocker", "element_blocker"));
+        assert!(same_id("Passwords", "passwords"));
+        assert!(!same_id("passwords", "passwords2"));
+    }
 
     #[test]
     fn a_page_keeps_session_values_for_its_site_alone() {

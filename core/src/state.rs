@@ -5,7 +5,6 @@
 //! is locked nothing is recorded, read or written.
 
 use crate::config;
-use crate::sync::{decrypt, encrypt};
 use crate::vault;
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
@@ -34,11 +33,11 @@ pub struct Store {
     save_queued: Cell<bool>,
 }
 
-fn history_path() -> PathBuf {
+pub(crate) fn history_path() -> PathBuf {
     config::data_dir().join("history.enc")
 }
 
-fn session_path() -> PathBuf {
+pub(crate) fn session_path() -> PathBuf {
     config::data_dir().join("session.enc")
 }
 
@@ -57,15 +56,14 @@ impl Store {
     }
 
     fn read<T: for<'de> Deserialize<'de>>(&self, path: &Path) -> Option<T> {
-        let blob = fs::read_to_string(path).ok()?;
-        let text = decrypt(&self.key()?, &blob).ok()?;
+        let text = vault::get().read_sealed(path, false)?;
         serde_json::from_str(&text).ok()
     }
 
     fn write<T: Serialize>(&self, path: &Path, value: &T) {
-        let (Some(key), Ok(text)) = (self.key(), serde_json::to_string(value)) else { return };
-        if let Ok(blob) = encrypt(&key, &text) {
-            let _ = vault::write_private(path, &blob);
+        let (Some(_), Ok(text)) = (self.key(), serde_json::to_string(value)) else { return };
+        if let Err(e) = vault::get().write_sealed(path, &text, false) {
+            eprintln!("wisp: cannot save {}: {e}", path.display());
         }
     }
 

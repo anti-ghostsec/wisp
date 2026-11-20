@@ -57,7 +57,50 @@ class YtdlpPath(unittest.TestCase):
         self.assertNotEqual(v.find_ytdlp("/bin/sh"), ["/bin/sh"])
 
 
+class HttpsOnly(unittest.TestCase):
+    def test_web_addresses_go_over_https(self):
+        self.assertEqual(v.https_url("https://a.com/x"), "https://a.com/x")
+        self.assertEqual(v.https_url("http://a.com/x"), "https://a.com/x")
+        self.assertEqual(v.https_url("http://u@a.com:80/x"), "https://u@a.com:80/x")
+        self.assertEqual(v.https_url("http://localhost:8000/x"), "http://localhost:8000/x")
+        self.assertEqual(v.https_url("http://192.168.1.2/v"), "http://192.168.1.2/v")
+        self.assertEqual(v.https_url("http://127.0.0.1@evil.com/"), "https://127.0.0.1@evil.com/")
+        for bad in ["file:///etc/passwd", "ftp://a.com/", "", None, "javascript:x"]:
+            self.assertIsNone(v.https_url(bad), bad)
+
+    def test_http_page_is_refused_or_upgraded(self):
+        sent = []
+        v.send, v.find_ytdlp = sent.append, lambda *_: None
+        msg = {"id": "j", "url": "file:///etc/passwd", "options": {}}
+        v.handle_download(msg)
+        self.assertIn("https://", sent[-1]["error"])
+
+
 class CookiesFile(unittest.TestCase):
+    def test_kept_in_a_private_folder_in_memory(self):
+        runtime = tempfile.mkdtemp()
+        old = os.environ.get("XDG_RUNTIME_DIR")
+        os.environ["XDG_RUNTIME_DIR"] = runtime
+        try:
+            path = v.save_cookies("# Netscape HTTP Cookie File\n")
+            self.assertTrue(path.startswith(runtime + "/"))
+            self.assertEqual(os.stat(os.path.dirname(path)).st_mode & 0o777, 0o700)
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            v.forget_cookies(path)
+            self.assertFalse(os.path.exists(os.path.dirname(path)))
+            # No runtime folder: no file at all.
+            del os.environ["XDG_RUNTIME_DIR"]
+            self.assertIsNone(v.save_cookies("x"))
+        finally:
+            if old is not None:
+                os.environ["XDG_RUNTIME_DIR"] = old
+            os.rmdir(runtime)
+
+    def test_never_another_browsers(self):
+        self.assertEqual(v.cookie_args({}), [])
+        self.assertEqual(v.cookie_args({"cookiesFromBrowser": "firefox"}), [])
+
+
     def test_settings_cannot_name_one(self):
         sent = []
         v.send, v.find_ytdlp = sent.append, lambda *_: None

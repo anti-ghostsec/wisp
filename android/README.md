@@ -79,7 +79,7 @@ security fixes reach Wisp, so move to each one.
   `fingerprint-shield` plugin.
 - **Permissions**: location, camera, microphone, notifications: denied.
 - **Pop-ups**: held by Gecko's blocker, shown in the bar with **Open** /
-  **Always allow on this site**.
+  **Allow on this site** (kept in memory until Wisp closes, never on disk).
 - **App links** (`mailto:`, `magnet:`, ...) open in another app after asking.
 - **Route** (☰ → *Route*):
   - *Direct*: straight out, through your VPN if one is on.
@@ -87,8 +87,15 @@ security fixes reach Wisp, so move to each one.
     tor-android, the tor Orbot runs). Everything (pages, the sync service)
     goes through it, host names looked up through Tor too. Until it's
     connected Gecko is pointed at a port nothing listens on: nothing loads,
-    and nothing ever goes around it.
-  - *Orbot*: through the Orbot app's SOCKS port instead, the same way.
+    and nothing ever goes around it. Its SOCKS port is the one it reports
+    once it's up, never a set one another app could be listening on, and
+    the route's settings are in place before any page or plugin loads.
+    All sites share Tor's circuits: GeckoView has no way to give each site
+    its own, as Tor Browser does (their cookies and storage are still kept
+    apart).
+  - *Orbot*: through the Orbot app's SOCKS port (9050) instead, the same
+    way. Any app can listen on that port, and Wisp can't tell Orbot from
+    another one, so the built-in Tor is the safer choice.
   - Changing the route clears cookies, site storage and caches first, so a
     site can't follow you from one route to the other, and pages load again
     only once Gecko has the new route's settings. On Tor (built in or

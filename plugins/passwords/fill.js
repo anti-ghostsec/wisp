@@ -207,6 +207,10 @@
 
   // ---- the key button and its menu ----
   let menu = null;
+  // When the menu was put up, and how long it must be up before a click
+  // in it counts.
+  let shownAt = 0;
+  const MENU_DELAY_MS = 500;
   const closeMenu = () => { menu?.remove(); menu = null; };
 
   const openMenu = async (field) => {
@@ -236,16 +240,19 @@
         b.textContent = it.label;
         if (it.note) b.append(Object.assign(document.createElement("small"), { textContent: it.note }));
         // mousedown keeps focus in the field, so the menu doesn't close first.
-        // Only a real click counts, never one a page script makes up.
+        // Only a real click counts, never one a page script makes up, and
+        // only once the menu has been there long enough to be seen: a page
+        // can't open it under a click meant for something else.
         b.onmousedown = (ev) => {
           ev.preventDefault();
-          if (!ev.isTrusted) return;
+          if (!ev.isTrusted || performance.now() - shownAt < MENU_DELAY_MS) return;
           closeMenu();
           it.run();
         };
         box.append(b);
       }
     });
+    shownAt = performance.now();
   };
 
   // The key sits inside the right end of the focused field.

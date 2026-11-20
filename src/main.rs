@@ -74,25 +74,14 @@ fn main() -> glib::ExitCode {
         let shared = shared.clone();
         Rc::new(move |app: &gtk::Application, uris: Vec<String>, starting: bool| {
             let shared = shared.borrow_mut().get_or_insert_with(|| Shared::new(app, cfg.take().unwrap_or_default())).clone();
-            // The first window of a run brings back the last session's tabs, if asked to.
-            let restored = if starting && uris.is_empty() { shared.restore_session() } else { None };
-            // Links from a later launch open as tabs in the window already open.
-            let reused = if !starting && !uris.is_empty() { shared.open_in_tabs(&uris) } else { None };
-            let window = restored.or(reused).unwrap_or_else(|| BrowserWindow::new(&shared, &uris));
-            window.warn_if_outdated();
-            if starting {
-                shared.ask_about_shadowed_plugins();
-                shared.ask_about_new_plugins();
-            }
-            if let Ok(path) = std::env::var("WISP_SCREENSHOT") {
-                let secs = std::env::var("WISP_SCREENSHOT_DELAY").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
-                window.screenshot_and_quit(path, std::time::Duration::from_secs(secs));
-            }
-            // For testing pop-ups: WISP_OPEN_ACTION=plugin/action presses that button.
-            if let Some((plugin, action)) = std::env::var("WISP_OPEN_ACTION").ok().and_then(|a| a.split_once('/').map(|(p, a)| (p.to_string(), a.to_string()))) {
-                let w = window.clone();
-                glib::timeout_add_local_once(std::time::Duration::from_secs(3), move || w.run_plugin_action(&plugin, &action));
-            }
+            // No page loads before the content filters (ad and tracker
+            // blocking, the HTTPS upgrade) are in force.
+            let hold = app.hold();
+            let s = shared.clone();
+            shared.plugins.when_filters_ready(move || {
+                open_window(&s, uris, starting);
+                drop(hold);
+            });
         })
     };
     app.connect_command_line(move |app, cmd| {
@@ -148,6 +137,30 @@ fn main() -> glib::ExitCode {
         }
     });
     app.run()
+}
+
+/// A window for `uris` (or the last session's tabs, at the start of a run),
+/// or tabs in the window already open.
+fn open_window(shared: &Rc<Shared>, uris: Vec<String>, starting: bool) {
+    // The first window of a run brings back the last session's tabs, if asked to.
+    let restored = if starting && uris.is_empty() { shared.restore_session() } else { None };
+    // Links from a later launch open as tabs in the window already open.
+    let reused = if !starting && !uris.is_empty() { shared.open_in_tabs(&uris) } else { None };
+    let window = restored.or(reused).unwrap_or_else(|| BrowserWindow::new(shared, &uris));
+    window.warn_if_outdated();
+    if starting {
+        shared.ask_about_shadowed_plugins();
+        shared.ask_about_new_plugins();
+    }
+    if let Ok(path) = std::env::var("WISP_SCREENSHOT") {
+        let secs = std::env::var("WISP_SCREENSHOT_DELAY").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
+        window.screenshot_and_quit(path, std::time::Duration::from_secs(secs));
+    }
+    // For testing pop-ups: WISP_OPEN_ACTION=plugin/action presses that button.
+    if let Some((plugin, action)) = std::env::var("WISP_OPEN_ACTION").ok().and_then(|a| a.split_once('/').map(|(p, a)| (p.to_string(), a.to_string()))) {
+        let w = window.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_secs(3), move || w.run_plugin_action(&plugin, &action));
+    }
 }
 
 /// GStreamer's GPU video decoders: VA-API (Intel, AMD) through the `va` and

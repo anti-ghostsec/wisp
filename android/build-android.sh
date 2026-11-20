@@ -36,8 +36,8 @@ export RUSTFLAGS="--remap-path-prefix=$HOME=~"
 rust=$here/rust
 app=$here/app/src/main
 echo "build-android: Rust core for $abi"
-cargo ndk --manifest-path "$rust/Cargo.toml" -t "$abi" --platform 26 -o "$app/jniLibs" build --release --lib
-cargo build --manifest-path "$rust/Cargo.toml" --release --bins
+cargo ndk --manifest-path "$rust/Cargo.toml" -t "$abi" --platform 26 -o "$app/jniLibs" build --release --locked --lib
+cargo build --manifest-path "$rust/Cargo.toml" --release --locked --bins
 "$rust/target/release/uniffi-bindgen" generate --library "$app/jniLibs/$abi/libwisp_ffi.so" \
     --language kotlin --out-dir "$app/java" --no-format >/dev/null
 

@@ -34,6 +34,8 @@ impl Runtime for Glib {
         let http = self.http.clone();
         Box::pin(async move {
             let msg = msg?;
+            // Never sent on elsewhere: the core sees a redirect, and refuses it.
+            msg.add_flags(soup::MessageFlags::NO_REDIRECT);
             if let Some(body) = body {
                 let bytes = glib::Bytes::from_owned(body.into_bytes());
                 msg.set_request_body_from_bytes(Some("application/json"), Some(&bytes));
