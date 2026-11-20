@@ -1151,6 +1151,11 @@ impl BrowserWindow {
             }
         });
         self.entry.add_controller(click);
+        // "Paste and Go" in the address bar's right-click menu, as in
+        // Firefox and Chrome: what's copied is opened (or searched for) at once.
+        let extra = gio::Menu::new();
+        extra.append(Some("Paste and Go"), Some("win.paste-and-go"));
+        self.entry.set_extra_menu(Some(&extra));
 
         let w = Rc::downgrade(self);
         self.notebook.connect_switch_page(move |nb, page, _| {
@@ -1212,6 +1217,21 @@ impl BrowserWindow {
             });
             self.window.add_action(&action);
         };
+        add("paste-and-go", Box::new(|w| {
+            let clipboard = w.entry.clipboard();
+            let w = Rc::downgrade(w);
+            glib::spawn_future_local(async move {
+                let Ok(Some(text)) = clipboard.read_text_future().await else { return };
+                let Some(win) = w.upgrade() else { return };
+                // One line: what was copied from a page often ends in a newline.
+                let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if text.is_empty() {
+                    return;
+                }
+                win.entry.set_text(&text);
+                win.entry.emit_activate();
+            });
+        }));
         add("share-page", Box::new(|w| {
             let Some(uri) = w.current_view().and_then(|v| v.uri()).map(|u| u.to_string()) else { return };
             if !(uri.starts_with("https://") || uri.starts_with("http://")) {

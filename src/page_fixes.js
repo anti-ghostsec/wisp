@@ -63,3 +63,14 @@ addEventListener("contextmenu", (e) => {
     if (!e.defaultPrevented) closeYouTubeMenu();
   }, 0);
 });
+// A video or sound on a loop: Wisp goes back to the start itself, a moment
+// before the end. WebKit's own looping (GStreamer, WebKit bug 302541)
+// sometimes plays the first seconds' sound twice; a plain seek doesn't.
+// timeupdate comes four times a second, so at most the last ~0.3 s is cut.
+document.addEventListener("timeupdate", (e) => {
+  const m = e.target;
+  if (!(m instanceof HTMLMediaElement) || !m.loop || m.paused || m.seeking) return;
+  const d = m.duration;
+  if (!Number.isFinite(d) || d < 2) return;
+  if (d - m.currentTime < 0.3) m.currentTime = 0;
+}, true);

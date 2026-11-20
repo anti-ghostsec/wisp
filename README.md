@@ -88,11 +88,11 @@ Wisp for Android, on GeckoView with the same Rust core (`core/`), is in
   kept going, unseen, and goes back to normal when you return or a little
   after it stops.
 - **Memory limit**: each web process has a soft limit (`memory_limit_mb`).
-  Above it, WebKit drops caches and runs garbage collection.
-- **Small caches**: the cache model is small (WebKit's document browser: it
-  still keeps pictures, so pages that redraw their lists don't fetch them
-  again and flash) and there is no back/forward page cache
-  (`low_memory_cache`).
+  From 60% of it, WebKit drops caches and runs garbage collection.
+- **Caches in memory**: decoded pictures are kept (WebKit's web browser
+  cache), so big pictures don't pop in again or stutter when scrolled back
+  to; in memory only, unless the profile is persistent. There is no
+  back/forward cache of whole pages (`low_memory_cache`).
 - **Rendering**: page content is drawn by the CPU and the browser UI with
   cairo, which keeps text crisp and keeps GPU drivers out of the UI process.
   Finished frames are composited on the GPU (`gpu_compositing`, on by

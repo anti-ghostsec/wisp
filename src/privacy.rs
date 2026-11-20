@@ -15,9 +15,12 @@ fn memory_settings(cfg: &Config) -> Option<MemoryPressureSettings> {
     }
     let mut s = MemoryPressureSettings::new();
     s.set_memory_limit(cfg.memory_limit_mb);
-    // Start trimming caches early; never kill a process just for being big.
-    s.set_conservative_threshold(0.33);
-    s.set_strict_threshold(0.5);
+    // Trimming starts at 60% of the limit, not WebKit's 33%: with every tab
+    // in one process, a page of big pictures got there at once, and the
+    // decoded pictures were dropped and decoded again while scrolling
+    // (jumpy, and slow to show). Never kill a process just for being big.
+    s.set_conservative_threshold(0.6);
+    s.set_strict_threshold(0.85);
     Some(s)
 }
 
@@ -51,16 +54,13 @@ pub fn web_context(cfg: &Config) -> WebContext {
         builder = builder.memory_pressure_settings(&s);
     }
     let ctx = builder.build();
-    // DocumentViewer, the smallest, keeps no pictures in memory at all:
-    // pages that redraw their lists (YouTube's thumbnails and avatars)
-    // fetched every picture again each time, and they flashed or stayed
-    // blank. DocumentBrowser still keeps them, in less memory than
-    // WebBrowser.
-    ctx.set_cache_model(if cfg.low_memory_cache {
-        CacheModel::DocumentBrowser
-    } else {
-        CacheModel::WebBrowser
-    });
+    // WebBrowser's cache holds the most decoded pictures, so scrolling
+    // back doesn't fetch and decode them again (the smaller models made
+    // big pictures pop in late, and YouTube's thumbnails flash). It's in
+    // memory only: the session keeps nothing on disk unless the profile
+    // is persistent. low_memory_cache now only turns off the back/forward
+    // cache of whole pages (below).
+    ctx.set_cache_model(CacheModel::WebBrowser);
     ctx.set_spell_checking_enabled(false);
     ctx
 }

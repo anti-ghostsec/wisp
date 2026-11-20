@@ -60,7 +60,7 @@ pub struct Config {
     /// Soft memory limit for each web process in MB (0 = WebKit default).
     /// Above it WebKit drops caches and runs GC aggressively.
     pub memory_limit_mb: u32,
-    /// Keep the in-memory page/resource cache small.
+    /// Don't keep whole pages in memory for Back and Forward.
     pub low_memory_cache: bool,
     /// Ask where to save each download. Otherwise files go to `download_dir`.
     pub ask_download_location: bool,
