@@ -71,6 +71,10 @@ pub struct PluginHost {
     pub plugins: Vec<Rc<Plugin>>,
     ucm: UserContentManager,
     filter_store: UserContentFilterStore,
+    /// Where Wisp's own filter is compiled: it names the sites you let
+    /// through over plain HTTP, so it's kept in the runtime folder (in
+    /// memory, gone when you log out), never with the cache on disk.
+    own_store: UserContentFilterStore,
     /// Compiled filters per plugin: (identifier, filter).
     filters: RefCell<HashMap<String, Vec<(String, UserContentFilter)>>>,
     /// Wisp's own filter (the HTTPS upgrade), kept through `apply`.
@@ -97,6 +101,9 @@ pub struct PluginHost {
     pub shadowed: Vec<(String, PathBuf)>,
     /// Toolbar badge text, by plugin id.
     badges: RefCell<HashMap<String, String>>,
+    /// Plugins of your own that can't run, with why: `plugin_signing_key`
+    /// is set and they aren't signed with it.
+    refused: HashMap<String, String>,
     /// The keys given to pages, each for one plugin in one view, and what
     /// they may reach: see `page_loaded`.
     pages: RefCell<HashMap<String, PageKey>>,
@@ -200,13 +207,38 @@ impl PluginHost {
     pub fn new(cfg: &Config, ucm: &UserContentManager, sync: Rc<Sync>, session: &NetworkSession) -> Rc<PluginHost> {
         let store_dir = config::cache_dir().join("content-filters");
         let _ = fs::create_dir_all(&store_dir);
+        // Older Wisps kept their own filter with the plugins'.
+        for entry in fs::read_dir(&store_dir).into_iter().flatten().flatten() {
+            if entry.file_name().to_string_lossy().contains("wisp-own-") {
+                wisp_core::vault::wipe(&entry.path());
+            }
+        }
+        let own_dir = glib::user_runtime_dir().join("wisp").join("own-filter");
+        let _ = fs::remove_dir_all(&own_dir);
+        let _ = fs::create_dir_all(&own_dir);
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(own_dir.parent().unwrap_or(&own_dir), fs::Permissions::from_mode(0o700));
+        }
         let http = soup::Session::new();
         http.set_timeout(60);
         let (plugins, shadowed) = discover(cfg);
+        let mut refused = HashMap::new();
+        if let Some(key) = cfg.plugin_signing_key.as_deref().filter(|k| !k.trim().is_empty()) {
+            for p in plugins.iter().filter(|p| !p.built_in) {
+                if let Err(why) = crate::signing::check_plugin(&p.dir, key) {
+                    eprintln!("wisp: plugin {} left off: {why}", p.manifest.id);
+                    p.enabled.set(false);
+                    p.trusted.set(false);
+                    refused.insert(p.manifest.id.clone(), why);
+                }
+            }
+        }
         let host = Rc::new(PluginHost {
             plugins,
             ucm: ucm.clone(),
             filter_store: UserContentFilterStore::new(&store_dir.to_string_lossy()),
+            own_store: UserContentFilterStore::new(&own_dir.to_string_lossy()),
             filters: RefCell::new(HashMap::new()),
             own_filter: RefCell::new(None),
             own_filter_turn: Cell::new(0),
@@ -223,6 +255,7 @@ impl PluginHost {
             native_denied: RefCell::default(),
             shadowed,
             badges: RefCell::new(HashMap::new()),
+            refused,
             pages: RefCell::default(),
         });
         for p in &host.plugins {
@@ -287,9 +320,36 @@ impl PluginHost {
         }
     }
 
+    /// Why plugin `id` can't run at all, if it can't.
+    pub fn refused(&self, id: &str) -> Option<&str> {
+        self.refused.get(id).map(String::as_str)
+    }
+
+    /// You allowed what plugin `id` declares (`Manifest::declaration`), as
+    /// it declares it now.
+    pub fn approve(&self, id: &str, cfg: &RefCell<Config>) {
+        let Some(p) = self.get(id).filter(|_| !self.refused.contains_key(id)) else { return };
+        p.trusted.set(true);
+        let mut cfg = cfg.borrow_mut();
+        cfg.approved_plugins.insert(id.to_string(), p.manifest.declaration_key());
+        cfg.save();
+    }
+
+    /// Plugins of your own that would be on but wait for you to allow what
+    /// they declare: new ones, and ones whose declaration changed.
+    pub fn to_review(&self, cfg: &Config) -> Vec<Rc<Plugin>> {
+        self.plugins
+            .iter()
+            .filter(|p| !p.trusted.get() && !self.refused.contains_key(&p.manifest.id))
+            .filter(|p| cfg.plugins.get(&p.manifest.id).copied().unwrap_or(p.manifest.enabled_by_default))
+            .cloned()
+            .collect()
+    }
+
     /// The settings are released before the UI is rebuilt, which reads them.
+    /// A plugin you haven't allowed (`approve`) isn't turned on.
     pub fn set_enabled(self: &Rc<Self>, id: &str, enabled: bool, cfg: &RefCell<Config>) {
-        if let Some(p) = self.get(id) {
+        if let Some(p) = self.get(id).filter(|p| !enabled || p.trusted.get()) {
             p.enabled.set(enabled);
             {
                 let mut cfg = cfg.borrow_mut();
@@ -519,7 +579,7 @@ impl PluginHost {
             Some(json) => {
                 let ident = format!("wisp-own-{:016x}", hash(&json));
                 let bytes = glib::Bytes::from_owned(json.into_bytes());
-                match self.filter_store.save_future(&ident, &bytes).await {
+                match self.own_store.save_future(&ident, &bytes).await {
                     Ok(filter) => Some((ident, filter)),
                     Err(e) => {
                         eprintln!("wisp: cannot compile Wisp's own content filter: {e}");
@@ -542,7 +602,7 @@ impl PluginHost {
             self.ucm.add_filter(filter);
         }
         if let Some((id, _)) = old.filter(|_| !same) {
-            let _ = self.filter_store.remove_future(&id).await;
+            let _ = self.own_store.remove_future(&id).await;
         }
     }
 

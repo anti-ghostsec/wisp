@@ -43,6 +43,7 @@ import org.mozilla.geckoview.GeckoSession.NavigationDelegate
 import org.mozilla.geckoview.GeckoSession.PermissionDelegate
 import org.mozilla.geckoview.GeckoSession.ProgressDelegate
 import org.mozilla.geckoview.GeckoView
+import org.mozilla.geckoview.StorageController
 import org.mozilla.geckoview.WebResponse
 import uniffi.wisp_ffi.SavedTab
 import java.io.File
@@ -67,6 +68,7 @@ class MainActivity : Activity(), Plugins.Ui {
     private val work = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
     private var ready = false
+    private var starting = false
     private var fullScreen = false
     /** Links handed to Wisp before it was ready. */
     private val waiting = mutableListOf<String>()
@@ -85,18 +87,22 @@ class MainActivity : Activity(), Plugins.Ui {
     }
 
     private fun onReady() {
-        if (ready) return
-        ready = true
+        if (ready || starting) return
+        starting = true
         work.execute { runCatching { Engine.core.syncWarmUp() } }
-        if (Tabs.list.isEmpty()) {
-            val saved = runCatching { Engine.core.loadTabs() }.getOrDefault(emptyList())
-            saved.forEach { Tabs.list += Tab(it.url, it.title) }
+        // The route's settings (Tor's proxy among them) are in force before
+        // the first page loads.
+        startRoute {
+            ready = true
+            if (Tabs.list.isEmpty()) {
+                val saved = runCatching { Engine.core.loadTabs() }.getOrDefault(emptyList())
+                saved.forEach { Tabs.list += Tab(it.url, it.title) }
+            }
+            waiting.forEach { open(it) }
+            waiting.clear()
+            if (Tabs.list.isEmpty()) openTab(home(), true) else show(Tabs.current ?: Tabs.list.last())
+            startSuspendTimer()
         }
-        waiting.forEach { open(it) }
-        waiting.clear()
-        if (Tabs.list.isEmpty()) openTab(home(), true) else show(Tabs.current ?: Tabs.list.last())
-        startRoute()
-        startSuspendTimer()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -110,7 +116,9 @@ class MainActivity : Activity(), Plugins.Ui {
      * to open, a search, or [TYPE]: a new tab with the keyboard up.
      */
     private fun linkOf(intent: Intent): String? = when (intent.action) {
-        Intent.ACTION_VIEW -> intent.dataString
+        // Web addresses only: an app naming Wisp itself could hand it any
+        // other kind (file:, javascript:, resource:, ...).
+        Intent.ACTION_VIEW -> intent.dataString?.takeIf { it.substringBefore(':').lowercase() in setOf("http", "https") }
         Intent.ACTION_WEB_SEARCH, Intent.ACTION_SEARCH ->
             intent.getStringExtra(android.app.SearchManager.QUERY)?.trim()?.takeIf { it.isNotEmpty() }
                 ?.let { uniffi.wisp_ffi.resolveAddress(it, Engine.config.optString("search_url")) } ?: TYPE
@@ -741,20 +749,32 @@ class MainActivity : Activity(), Plugins.Ui {
         AlertDialog.Builder(this)
             .setTitle("Route")
             .setSingleChoiceItems(labels, routes.indexOf(Engine.route(this))) { dialog, i ->
-                Engine.setRoute(this, routes[i])
                 dialog.dismiss()
-                startRoute()
-                Tabs.current?.session?.reload()
+                val before = Engine.route(this)
+                if (routes[i] == before) return@setSingleChoiceItems
+                Engine.setRoute(this, routes[i])
+                // Nothing a site kept on one route follows you onto another:
+                // cookies, site storage and caches go, then the route's
+                // settings are in force before the page loads again.
+                Engine.runtime.storageController.clearData(StorageController.ClearFlags.ALL).accept({
+                    startRoute { Tabs.current?.session?.reload() }
+                }, {
+                    startRoute { Tabs.current?.session?.reload() }
+                })
+                Toast.makeText(this, "Cookies and site data cleared for the new route", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    /** Start (or stop) the built-in Tor for the route, and point Gecko at it. */
-    private fun startRoute() {
+    /**
+     * Start (or stop) the built-in Tor for the route, and point Gecko at it;
+     * [then] runs once Gecko has the route's settings.
+     */
+    private fun startRoute(then: () -> Unit = {}) {
         val route = Engine.route(this)
         if (route != Engine.Route.TOR) Tor.stop(this)
-        Engine.applyPrefs(this)
+        Engine.applyPrefs(this).accept({ then() }, { then() })
         when (route) {
             Engine.Route.ORBOT -> checkOrbot()
             Engine.Route.TOR -> {
@@ -864,7 +884,7 @@ class MainActivity : Activity(), Plugins.Ui {
         }
         val status = TextView(this).apply {
             text = if (account != null) "Connected." else
-                "Not set up yet. An account is made for you the first time you save a bookmark or password, or enter your own above."
+                "Not set up: bookmarks and passwords stay on this phone, and no sync service is contacted. \"Create new\" makes an account on the service above; \"Use this account\" connects to yours. Either sends what's kept here, encrypted."
         }
         val dialog = AlertDialog.Builder(this)
             .setTitle("Sync account")

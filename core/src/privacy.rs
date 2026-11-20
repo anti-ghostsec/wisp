@@ -3,13 +3,17 @@
 
 use crate::config::Config;
 
-/// Query parameters that exist only to track people across sites.
+/// Query parameters that exist only to track people across sites, in lower
+/// case (names are compared without regard to case).
 const TRACKING_PARAMS: &[&str] = &[
-    "fbclid", "gclid", "gclsrc", "dclid", "gbraid", "wbraid", "msclkid", "mc_cid", "mc_eid",
-    "yclid", "igshid", "twclid", "ttclid", "li_fat_id", "_hsenc", "_hsmi", "mkt_tok", "oly_anon_id",
-    "oly_enc_id", "vero_id", "rb_clickid", "s_cid", "ref_src", "spm",
+    "fbclid", "gclid", "gclsrc", "dclid", "gbraid", "wbraid", "gad_source", "gad_campaignid", "srsltid", "msclkid",
+    "mc_cid", "mc_eid", "yclid", "ysclid", "igshid", "igsh", "twclid", "ttclid", "li_fat_id", "epik", "_hsenc",
+    "_hsmi", "__hstc", "__hssc", "__hsfp", "hsctatracking", "mkt_tok", "oly_anon_id", "oly_enc_id", "vero_id",
+    "vero_conv", "rb_clickid", "s_cid", "ref_src", "spm", "scm", "irclickid", "wickedid", "_openstat", "_branch_match_id",
+    "_branch_referrer", "ss_email_id", "ml_subscriber", "ml_subscriber_hash", "sms_click", "sms_source", "sms_uph",
+    "dm_i", "__s", "_kx", "trk_contact", "trk_msg", "trk_module", "trk_sid",
 ];
-const TRACKING_PREFIXES: &[&str] = &["utm_", "pk_", "hsa_"];
+const TRACKING_PREFIXES: &[&str] = &["utm_", "pk_", "hsa_", "mtm_", "piwik_", "matomo_"];
 
 /// Split a URL into (scheme, host) without pulling in a URL crate.
 pub fn scheme_and_host(uri: &str) -> Option<(&str, &str)> {
@@ -19,7 +23,8 @@ pub fn scheme_and_host(uri: &str) -> Option<(&str, &str)> {
 
 /// The part between `://` and the path, without any `user:password@`.
 pub(crate) fn authority(rest: &str) -> &str {
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // A backslash ends the host too, as browsers read http(s) addresses.
+    let authority = rest.split(['/', '\\', '?', '#']).next().unwrap_or("");
     authority.rsplit('@').next().unwrap_or(authority)
 }
 
@@ -78,10 +83,15 @@ fn is_local_ip(ip: std::net::IpAddr) -> bool {
 
 /// The start of a rule's pattern: http://, with or without `user@`.
 const HTTP: &str = "^http://([^/@]*@)?";
+/// The end of a host in a rule's pattern: a port if there is one, then the
+/// path, which WebKit always writes (at least "/").
+const HOST_END: &str = "(:[0-9]+)?/";
 
 /// The hosts of `is_local_host`, as patterns for WebKit's content filter
 /// (which has no "or"). Addresses are matched as WebKit writes them: four
-/// numbers, or lower-case IPv6 in brackets.
+/// numbers, or lower-case IPv6 in brackets. Each is followed by `HOST_END`,
+/// so that a user name that looks like a local host
+/// (`http://127.0.0.1:x@tracker.example/`) doesn't count as one.
 const LOCAL_HOST_PATTERNS: &[&str] = &[
     r"([^/:@]*\.)?localhost",
     r"[^/:@]*\.local",
@@ -99,13 +109,14 @@ const LOCAL_HOST_PATTERNS: &[&str] = &[
     r"\[fe[89ab][0-9a-f]:[0-9a-f:.]*\]",
 ];
 
-/// A content filter that turns http:// into https:// for pages and frames
+/// A content filter that turns http:// into https:// for pages, frames and
+/// everything they load (pictures, scripts, requests from scripts, ...)
 /// inside the web process, before anything is sent. The upgrade done when a
 /// load starts (`rewrite_url`) comes too late for that: by then the request
 /// may be on its way. `allowed` are the `http_site`s let through as they are.
 pub fn https_filter(allowed: &[String]) -> String {
     let mut rules = vec![serde_json::json!({
-        "trigger": { "url-filter": "^http://", "resource-type": ["document"] },
+        "trigger": { "url-filter": "^http://" },
         "action": { "type": "make-https" },
     })];
     let mut skip = |pattern: String| {
@@ -115,13 +126,28 @@ pub fn https_filter(allowed: &[String]) -> String {
         }));
     };
     for host in LOCAL_HOST_PATTERNS {
-        skip(format!("{HTTP}{host}[:/]"));
+        skip(format!("{HTTP}{host}{HOST_END}"));
     }
     for site in allowed {
         let Some((host, port)) = site.rsplit_once(':') else { continue };
         let host = filter_escape(host);
         skip(if port == "80" { format!("{HTTP}{host}(:80)?/") } else { format!("{HTTP}{host}:{port}/") });
     }
+    serde_json::Value::Array(rules).to_string()
+}
+
+/// Wisp's own content filter: the HTTPS upgrade (with `https_only`), and
+/// no `<a ping>`, a request to a tracker each time a link is clicked (which
+/// WebKit no longer has a setting for; beacons are sent the same way and go
+/// too).
+pub fn own_filter(https_only: bool, allowed: &[String]) -> String {
+    let mut rules: Vec<serde_json::Value> =
+        if https_only { serde_json::from_str(&https_filter(allowed)).unwrap_or_default() } else { Vec::new() };
+    // Last: an exception to HTTPS-only mustn't let a ping through.
+    rules.push(serde_json::json!({
+        "trigger": { "url-filter": ".*", "resource-type": ["ping"] },
+        "action": { "type": "block" },
+    }));
     serde_json::Value::Array(rules).to_string()
 }
 
@@ -138,7 +164,8 @@ fn filter_escape(text: &str) -> String {
 }
 
 fn is_tracking_param(name: &str) -> bool {
-    TRACKING_PARAMS.contains(&name) || TRACKING_PREFIXES.iter().any(|p| name.starts_with(p))
+    let name = name.to_ascii_lowercase();
+    TRACKING_PARAMS.contains(&name.as_str()) || TRACKING_PREFIXES.iter().any(|p| name.starts_with(p))
 }
 
 /// `uri` without its tracking parameters, if it had any.
@@ -197,6 +224,25 @@ mod tests {
         );
         assert_eq!(strip_params("https://a.com/x?utm_source=t").as_deref(), Some("https://a.com/x"));
         assert_eq!(strip_params("https://a.com/x?id=3"), None);
+        // Names are compared without regard to case.
+        assert_eq!(strip_params("https://a.com/x?UTM_Source=t&FBCLID=1&Id=3").as_deref(), Some("https://a.com/x?Id=3"));
+        assert_eq!(strip_params("https://a.com/x?mtm_campaign=a&gad_source=1").as_deref(), Some("https://a.com/x"));
+    }
+
+    #[test]
+    fn a_user_name_is_not_the_host() {
+        let cfg = Config::default();
+        let no = |_: &str| false;
+        assert_eq!(scheme_and_host("http://127.0.0.1:x@tracker.com/"), Some(("http", "tracker.com")));
+        assert_eq!(scheme_and_host("http://localhost@tracker.com/a@b"), Some(("http", "tracker.com")));
+        assert_eq!(scheme_and_host("http://127.0.0.1\\@tracker.com/"), Some(("http", "127.0.0.1")));
+        assert_eq!(
+            rewrite_url("http://127.0.0.1:x@tracker.com/p", &cfg, no).as_deref(),
+            Some("https://127.0.0.1:x@tracker.com/p")
+        );
+        assert_eq!(rewrite_url("http://a.local@tracker.com/", &cfg, no).as_deref(), Some("https://a.local@tracker.com/"));
+        assert_eq!(http_site("http://localhost:80@tracker.com/").as_deref(), Some("tracker.com:80"));
+        assert_eq!(rewrite_url("http://u:p@127.0.0.1:8000/", &cfg, no), None);
     }
 
     #[test]
@@ -256,15 +302,56 @@ mod tests {
         let rules = rules.as_array().unwrap();
         assert_eq!(rules[0]["action"]["type"], "make-https");
         assert_eq!(rules[0]["trigger"]["url-filter"], "^http://");
+        // Not only pages: pictures, scripts and requests too.
+        assert!(rules[0]["trigger"].get("resource-type").is_none());
         // Everything after the first rule is an exception to it.
         assert!(rules[1..].iter().all(|r| r["action"]["type"] == "ignore-previous-rules"));
         let patterns: Vec<&str> = rules[1..].iter().map(|r| r["trigger"]["url-filter"].as_str().unwrap()).collect();
         assert_eq!(patterns.len(), LOCAL_HOST_PATTERNS.len() + 3);
-        assert!(patterns.contains(&r"^http://([^/@]*@)?([^/:@]*\.)?localhost[:/]"));
-        assert!(patterns.contains(&r"^http://([^/@]*@)?192\.168\.[0-9.]+[:/]"));
+        assert!(patterns.contains(&r"^http://([^/@]*@)?([^/:@]*\.)?localhost(:[0-9]+)?/"));
+        assert!(patterns.contains(&r"^http://([^/@]*@)?192\.168\.[0-9.]+(:[0-9]+)?/"));
         assert!(patterns.contains(&r"^http://([^/@]*@)?a\.com(:80)?/"));
         assert!(patterns.contains(&r"^http://([^/@]*@)?b-c\.org:8080/"));
         assert!(patterns.contains(&r"^http://([^/@]*@)?\[2001:db8::1\](:80)?/"));
+    }
+
+    #[test]
+    fn own_filter_blocks_pings_last() {
+        for https_only in [true, false] {
+            let rules: serde_json::Value = serde_json::from_str(&own_filter(https_only, &["a.com:80".into()])).unwrap();
+            let rules = rules.as_array().unwrap();
+            let last = rules.last().unwrap();
+            assert_eq!(last["action"]["type"], "block");
+            assert_eq!(last["trigger"]["resource-type"], serde_json::json!(["ping"]));
+            assert_eq!(rules.iter().any(|r| r["action"]["type"] == "make-https"), https_only);
+        }
+    }
+
+    /// The filter's exceptions, run as the regular expressions they are:
+    /// a local-looking user name never lets another host through.
+    #[test]
+    fn https_filter_exceptions_match_the_host_only() {
+        let rules: serde_json::Value = serde_json::from_str(&https_filter(&["a.com:80".into()])).unwrap();
+        let skips: Vec<regex::Regex> = rules.as_array().unwrap()[1..]
+            .iter()
+            .map(|r| regex::Regex::new(r["trigger"]["url-filter"].as_str().unwrap()).unwrap())
+            .collect();
+        let skipped = |url: &str| skips.iter().any(|r| r.is_match(url));
+        for local in [
+            "http://localhost/", "http://localhost:8000/x", "http://app.localhost/", "http://127.0.0.1/",
+            "http://127.0.0.1:3000/a?b", "http://192.168.1.1/", "http://u:p@10.0.0.1:81/", "http://[::1]:8080/",
+            "http://printer.local/", "http://a.com/", "http://a.com:80/x", "http://u@a.com/",
+        ] {
+            assert!(skipped(local), "{local} stays on http");
+        }
+        for upgraded in [
+            "http://127.0.0.1:x@tracker.com/", "http://127.0.0.1:80@tracker.com/", "http://localhost@tracker.com/",
+            "http://localhost:1@tracker.com/", "http://a.local@tracker.com/", "http://192.168.1.1.tracker.com/",
+            "http://localhost.tracker.com/", "http://a.com.tracker.com/", "http://a.com:80@tracker.com/",
+            "http://a.com:8080/", "http://tracker.com/?u=http://localhost/",
+        ] {
+            assert!(!skipped(upgraded), "{upgraded} is upgraded");
+        }
     }
 
     #[test]

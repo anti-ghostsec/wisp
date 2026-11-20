@@ -1,11 +1,24 @@
 // Fills saved logins and offers to save new ones. Runs in the plugin's
 // isolated world: the page can't see this code, the credentials or `wisp`.
 (() => {
-  // Local servers (development, routers, NAS boxes) count too, by address
-  // and port, since each port is usually a different app; other plain-HTTP
-  // sites don't, as a password typed there travels unencrypted.
+  // Hosts kept with their port, since each port is usually a different app:
+  // local names and addresses given as numbers (as Wisp keys them too).
   const isLocal = (h) => h === "localhost" || /\.(localhost|test)$/.test(h) || /^\d+\.\d+\.\d+\.\d+$/.test(h) || h.startsWith("[");
-  if (location.protocol !== "https:" && !isLocal(location.hostname)) return;
+  // Servers on this computer or the local network (development, routers,
+  // NAS boxes) count over plain HTTP too; other plain-HTTP sites don't, a
+  // public address given as numbers among them, as a password typed there
+  // travels unencrypted.
+  const isPrivate = (h) => {
+    if (h === "localhost" || /\.(localhost|test)$/.test(h)) return true;
+    const v4 = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+    if (v4) {
+      const [a, b] = [+v4[1], +v4[2]];
+      return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+    }
+    const v6 = h.replace(/^\[|\]$/g, "").toLowerCase();
+    return v6 === "::1" || /^f[cd][0-9a-f]{2}:/.test(v6) || /^fe[89ab][0-9a-f]:/.test(v6);
+  };
+  if (location.protocol !== "https:" && !(location.protocol === "http:" && isPrivate(location.hostname))) return;
   const hostOf = (u) => (isLocal(u.hostname) ? u.host : u.hostname.replace(/^www\./, ""));
   const host = hostOf(location);
   // Saved logins are offered on the host they were saved for and nowhere
@@ -223,8 +236,10 @@
         b.textContent = it.label;
         if (it.note) b.append(Object.assign(document.createElement("small"), { textContent: it.note }));
         // mousedown keeps focus in the field, so the menu doesn't close first.
+        // Only a real click counts, never one a page script makes up.
         b.onmousedown = (ev) => {
           ev.preventDefault();
+          if (!ev.isTrusted) return;
           closeMenu();
           it.run();
         };
@@ -257,6 +272,7 @@
     const k = (keyEl = root.querySelector(".key"));
     k.onmousedown = (ev) => {
       ev.preventDefault();
+      if (!ev.isTrusted) return;
       menu ? closeMenu() : openMenu(field);
     };
     document.documentElement.appendChild(keyButton);
@@ -266,15 +282,16 @@
   addEventListener("resize", placeKey, { passive: true });
 
   // Fields the key button shows on: every password field, and username
-  // fields on sites with saved logins.
+  // fields on sites with saved logins. Nothing is filled in until you pick
+  // a login from the list, so a page never gets one just by loading.
   document.addEventListener("focusin", async (ev) => {
     const el = ev.target;
     if (!(el instanceof HTMLInputElement)) return;
     if (isPassword(el)) {
       showKey(el);
       const creds = await loadSaved();
-      // Offer the choice straight away when it isn't obvious.
-      if (!el.value && (isNewPassword(el) ? !el.dataset.wispOffered : creds.length > 1)) {
+      // Offer the choice straight away.
+      if (!el.value && !el.dataset.wispOffered && (isNewPassword(el) || creds.length)) {
         el.dataset.wispOffered = "1";
         openMenu(el);
       }
@@ -318,48 +335,6 @@
     field.focus();
     draft = { pw: field, password, generated: true };
     toast("Strong password filled in. Wisp will offer to save it when you submit.");
-  };
-
-  let filledUser = false, filledPassword = false;
-  const tryFill = async () => {
-    const creds = await loadSaved();
-    if (!creds.length) return;
-    const fields = passwordFields();
-    // Username-only step of a two-step login.
-    if (!fields.length) {
-      if (filledUser) return;
-      const user = [...document.querySelectorAll("input")].find((i) => visible(i) && (/username|email/.test(i.autocomplete) || i.type === "email"));
-      if (user && !user.value && creds.length === 1 && creds[0].username) {
-        setValue(user, creds[0].username);
-        user.blur();
-        filledUser = true;
-      }
-      return;
-    }
-    if (filledPassword) return;
-    const remembered = await recentUsername();
-    for (const pw of fields) {
-      if (pw.dataset.wispSeen || pw.value || isNewPassword(pw)) continue;
-      pw.dataset.wispSeen = "1";
-      const user = usernameFieldFor(pw);
-      const known = user?.value.trim() || hiddenUsername(pw) || (user ? "" : remembered);
-      let pick = null;
-      if (known) {
-        const same = creds.filter((c) => c.username === known);
-        if (same.length === 1) pick = same[0];
-      } else if (user && creds.length === 1) {
-        // An ordinary login form with one saved login for the site.
-        pick = creds[0];
-      }
-      // A password field on its own with no username we know of is usually
-      // "confirm your password" while logged in: only the key button there.
-      if (pick) {
-        fillFrom(pw, pick);
-        pw.blur();
-        filledPassword = true;
-        return;
-      }
-    }
   };
 
   // ---- saving ----
@@ -534,18 +509,4 @@
   });
 
   checkPending();
-  tryFill().then(() => {
-    if (!saved?.length) return;
-    // Single-page apps render login forms whenever they like, and two-step
-    // logins show the password field after the username step.
-    let queued = false;
-    const started = Date.now();
-    const observer = new MutationObserver(() => {
-      if (filledPassword || Date.now() - started > 5 * 60 * 1000) return observer.disconnect();
-      if (queued) return;
-      queued = true;
-      setTimeout(() => { queued = false; tryFill(); }, 400);
-    });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
-  });
 })();

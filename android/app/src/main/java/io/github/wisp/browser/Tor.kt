@@ -35,8 +35,9 @@ object Tor {
             } else if (status != TorService.STATUS_STARTING) {
                 port = 0
             }
-            Engine.applyPrefs(context)
-            onChange?.invoke(status)
+            // Pages reload (onChange) only once Gecko is pointed at Tor.
+            val changed = status
+            Engine.applyPrefs(context).accept({ onChange?.invoke(changed) }, { onChange?.invoke(changed) })
         }
     }
 

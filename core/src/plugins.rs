@@ -169,6 +169,108 @@ pub struct Plugin {
     pub manifest: Manifest,
     pub dir: PathBuf,
     pub enabled: Cell<bool>,
+    /// Comes with Wisp, or you allowed what it declares now. Others stay
+    /// off until you do.
+    pub trusted: Cell<bool>,
+    /// Came with Wisp (not from your own plugins folder or WISP_PLUGIN_PATH).
+    pub built_in: bool,
+}
+
+fn sorted(v: &[String]) -> Vec<&str> {
+    let mut v: Vec<&str> = v.iter().map(String::as_str).collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// The parts of a manifest that say what a plugin may reach, as allowing it
+/// remembers them.
+#[derive(serde::Serialize)]
+struct Declared<'a> {
+    id: &'a str,
+    permissions: Vec<&'a str>,
+    sync_prefixes: Vec<&'a str>,
+    sync_by_site: bool,
+    site_may_remove: bool,
+    scripts: Vec<(Vec<&'a str>, Vec<&'a str>, bool, bool)>,
+    background: bool,
+    native: &'a [String],
+    filter_lists: Vec<&'a str>,
+}
+
+impl Manifest {
+    /// What the plugin declares it may do, in words, for asking you.
+    pub fn declaration(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for cs in &self.content_scripts {
+            if cs.js.is_empty() && cs.css.is_empty() {
+                continue;
+            }
+            let what = if cs.js.is_empty() { "Changes how pages look" } else { "Runs scripts" };
+            let world = if cs.world == World::Page && !cs.js.is_empty() { " (in the page itself, seen by its scripts)" } else { "" };
+            let frames = if cs.all_frames { ", frames included" } else { "" };
+            let mut line = format!("{what} on {}{frames}{world}", cs.matches.join(", "));
+            if !cs.exclude_matches.is_empty() {
+                line.push_str(&format!(", except {}", cs.exclude_matches.join(", ")));
+            }
+            out.push(line);
+        }
+        let mut perms: Vec<&str> = self.permissions.iter().map(String::as_str).collect();
+        perms.sort_unstable();
+        perms.dedup();
+        for perm in perms {
+            out.push(match perm {
+                "storage" => "Keeps data of its own (encrypted)".into(),
+                "tabs" => "Opens tabs, and sees the address and title of the current one".into(),
+                "notifications" => "Shows notifications".into(),
+                "sync" => {
+                    let whose = if self.sync_by_site { " (a page only its own site's)" } else { "" };
+                    format!("Reads and changes your synced entries starting with {}{whose}", self.sync_prefixes.join(", "))
+                }
+                "clipboard" => "Copies to the clipboard".into(),
+                "downloads" => "Starts downloads".into(),
+                "cookies" => "Reads your cookies for sites".into(),
+                "media" => "Sees the video and audio playing in tabs".into(),
+                "native" if self.native.is_empty() => "Opens files and folders with other programs".into(),
+                "native" => format!("Starts a program on your computer, outside the browser: {}", self.native.join(" ")),
+                other => format!("Permission \"{other}\""),
+            });
+        }
+        if !self.background.is_empty() {
+            out.push("Runs in the background while it's on".into());
+        }
+        for list in &self.filter_lists {
+            out.push(format!("Downloads a block list from {}", list.url));
+        }
+        if out.is_empty() {
+            out.push("Nothing beyond its own pages".into());
+        }
+        out
+    }
+
+    /// A fingerprint of what the plugin declares it may do: allowing a
+    /// plugin is for this, and a change asks again.
+    pub fn declaration_key(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let declared = Declared {
+            id: &self.id,
+            permissions: sorted(&self.permissions),
+            sync_prefixes: sorted(&self.sync_prefixes),
+            sync_by_site: self.sync_by_site,
+            site_may_remove: self.site_may_remove,
+            scripts: self
+                .content_scripts
+                .iter()
+                .filter(|cs| !cs.js.is_empty() || !cs.css.is_empty())
+                .map(|cs| (sorted(&cs.matches), sorted(&cs.exclude_matches), cs.world == World::Page, cs.all_frames))
+                .collect(),
+            background: !self.background.is_empty(),
+            native: &self.native,
+            filter_lists: self.filter_lists.iter().map(|l| l.url.as_str()).collect(),
+        };
+        let text = serde_json::to_string(&declared).unwrap_or_default();
+        Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+    }
 }
 
 impl Plugin {
@@ -534,7 +636,19 @@ pub fn discover(cfg: &Config) -> (Vec<Rc<Plugin>>, Vec<(String, PathBuf)>) {
     let mut found: Vec<Rc<Plugin>> = Vec::new();
     let mut shadowed = Vec::new();
     let user_dir = user_plugin_dir();
+    // Plugins from these weren't shipped with Wisp: they run once you've
+    // allowed what they declare.
+    let mut own_dirs = vec![user_dir.clone()];
+    if let Ok(extra) = std::env::var("WISP_PLUGIN_PATH") {
+        own_dirs.extend(std::env::split_paths(&extra));
+    }
+    let plugin = |manifest: Manifest, path: PathBuf, built_in: bool| {
+        let trusted = built_in || cfg.approved_plugins.get(&manifest.id) == Some(&manifest.declaration_key());
+        let enabled = trusted && cfg.plugins.get(&manifest.id).copied().unwrap_or(manifest.enabled_by_default);
+        Rc::new(Plugin { manifest, dir: path, enabled: Cell::new(enabled), trusted: Cell::new(trusted), built_in })
+    };
     for dir in plugin_dirs() {
+        let built_in = !own_dirs.contains(&dir);
         let Ok(entries) = fs::read_dir(&dir) else { continue };
         let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
         entries.sort();
@@ -548,11 +662,10 @@ pub fn discover(cfg: &Config) -> (Vec<Rc<Plugin>>, Vec<(String, PathBuf)>) {
                     continue;
                 }
             };
-            let enabled = cfg.plugins.get(&manifest.id).copied().unwrap_or(manifest.enabled_by_default);
             if let Some(i) = found.iter().position(|p| p.manifest.id == manifest.id) {
                 if dir == user_dir && found[i].dir != path {
                     if cfg.plugin_overrides.contains(&manifest.id) {
-                        found[i] = Rc::new(Plugin { manifest, dir: path, enabled: Cell::new(enabled) });
+                        found[i] = plugin(manifest, path, false);
                     } else {
                         eprintln!("wisp: {} has the id of a built-in plugin; using the built-in one", path.display());
                         shadowed.push((manifest.id, path));
@@ -560,7 +673,7 @@ pub fn discover(cfg: &Config) -> (Vec<Rc<Plugin>>, Vec<(String, PathBuf)>) {
                 }
                 continue;
             }
-            found.push(Rc::new(Plugin { manifest, dir: path, enabled: Cell::new(enabled) }));
+            found.push(plugin(manifest, path, built_in));
         }
     }
     (found, shadowed)
@@ -732,6 +845,36 @@ mod tests {
         assert_eq!(site_of("192.168.1.1:8080"), "192.168.1.1:8080");
         assert_eq!(site_of("app.localhost:3000"), "app.localhost:3000");
         assert_ne!(site_of("evil.com"), site_of("example.com"));
+    }
+
+    #[test]
+    fn a_changed_declaration_is_asked_about_again() {
+        let manifest = |extra: &str| -> Manifest {
+            serde_json::from_str(&format!(r#"{{"id": "x", "name": "X", "permissions": ["tabs", "storage"],
+                "content_scripts": [{{"matches": ["https://a.example/*"], "js": ["a.js"]}}]{extra}}}"#))
+            .unwrap()
+        };
+        let base = manifest("");
+        assert_eq!(base.declaration_key(), manifest(r#", "version": "2", "description": "new""#).declaration_key());
+        let reordered: Manifest = serde_json::from_str(r#"{"id": "x", "name": "Y", "permissions": ["storage", "tabs"],
+            "content_scripts": [{"matches": ["https://a.example/*"], "js": ["b.js"]}]}"#).unwrap();
+        assert_eq!(base.declaration_key(), reordered.declaration_key());
+        for changed in [
+            r#", "background": ["bg.js"]"#,
+            r#", "native": ["python3", "host.py"]"#,
+            r#", "sync_prefixes": ["p_"]"#,
+            r#", "filter_lists": [{"name": "l", "url": "https://lists.example/l.txt"}]"#,
+        ] {
+            assert_ne!(base.declaration_key(), manifest(changed).declaration_key(), "{changed}");
+        }
+        let more_sites: Manifest = serde_json::from_str(r#"{"id": "x", "name": "X", "permissions": ["tabs", "storage"],
+            "content_scripts": [{"matches": ["*://*/*"], "js": ["a.js"]}]}"#).unwrap();
+        assert_ne!(base.declaration_key(), more_sites.declaration_key());
+        let helper: Manifest =
+            serde_json::from_str(r#"{"id": "x", "name": "X", "permissions": ["native"], "native": ["python3", "host.py"]}"#).unwrap();
+        let words = helper.declaration();
+        assert!(words.iter().any(|l| l.contains("python3 host.py")), "{words:?}");
+        assert!(base.declaration().iter().any(|l| l.contains("https://a.example/*")));
     }
 
     #[test]

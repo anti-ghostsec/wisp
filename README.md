@@ -22,14 +22,16 @@ Wisp for Android, on GeckoView with the same Rust core (`core/`), is in
 
 - **Private session**: an ephemeral network session, so cookies, cache and
   site storage never touch the disk. Set `persistent_profile: true` to keep them.
-- **HTTPS-only**: http:// pages and frames are upgraded before anything is
-  sent, sites given as a public IP address included; only this computer,
+- **HTTPS-only**: http:// pages, frames and everything they load (pictures,
+  scripts, requests) are upgraded before anything is sent, sites given as a public IP address included; only this computer,
   the local network (private and link-local addresses) and `.local`,
   `.onion`, `.test` and `localhost` names stay on HTTP. If HTTPS fails, a
   warning page lets you continue over HTTP for that host and port, for this
-  session only. Only that page's own button can do so: a web page can't
-  allow HTTP for another site.
-- **Tracking parameters** (`utm_*`, `fbclid`, `gclid`, …) are removed from URLs.
+  session only (it's kept in memory, never written to disk). Only that
+  page's own button can do so: a web page can't allow HTTP for another site.
+- **Tracking parameters** (`utm_*`, `fbclid`, `gclid`, …, in any case) are
+  removed from URLs: from links you click and addresses you open before
+  they're sent, and from links you share.
 - **Cookies and tracking**: third-party cookies are blocked, and WebKit's
   Intelligent Tracking Prevention is on.
 - **Ad & tracker blocking** (the `adblock` plugin): EasyList, EasyPrivacy and
@@ -40,8 +42,8 @@ Wisp for Android, on GeckoView with the same Rust core (`core/`), is in
   pop-under trick) is held behind a bar with **Open** / **Always allow on this
   site**. Normal `target=_blank` links open as tabs.
 - **Disabled features**: WebGL, WebRTC, WebKit's own credential storage and
-  script popups are off. The ad blocker also blocks third-party `<a ping>`
-  beacons.
+  script popups are off, and so is `<a ping>` (no request goes out when you
+  click a link that has one).
 - **Safer JavaScript** (☰ → *Safer JavaScript (slower)*, `no_jit`, off by
   default): scripts run in JavaScriptCore's interpreter only, without the
   JIT compiler that most browser exploits go through. Heavy sites and web
@@ -120,9 +122,10 @@ Wisp for Android, on GeckoView with the same Rust core (`core/`), is in
 ## Bookmarks & passwords
 
 The `bookmarks` (Ctrl+D, Ctrl+Shift+O) and `passwords` plugins sync through
-xBrowserSync, end-to-end encrypted. You don't need to set anything up: an
-account is created the first time you save something. To use your own sync
-ID and password, open ☰ → **Sync account…**. A sync service must be reached
+xBrowserSync, end-to-end encrypted, once you set it up in ☰ → **Sync
+account…** (create an account, or enter your own sync ID and password). Until
+then nothing is sent anywhere: bookmarks and passwords are kept on this
+computer, encrypted, and go up with the first sync. A sync service must be reached
 over `https://` (one on this computer, or a `.onion` address, may be
 `http://`).
 
@@ -148,10 +151,14 @@ Right-clicking a text field also offers **Fill saved login…** and **Generate
 strong password**. A lone password field while you're logged in (a "confirm
 your password" prompt) is never filled automatically or offered for saving.
 
+Logins are only filled when you pick one: the key button's list opens when
+you click into a login field, and nothing is put into a page before that.
+
 Local servers work too, over plain HTTP: `localhost`, `*.localhost`,
-`*.test` and IP addresses (a dev server, your router), each address and port
-with its own logins. Other plain-HTTP sites are left alone, since a password
-sent there isn't encrypted.
+`*.test` and loopback or private-network addresses (a dev server, your
+router), each address and port with its own logins. Other plain-HTTP sites,
+public IP addresses among them, are left alone, since a password sent there
+isn't encrypted.
 
 **Importing**: the password manager imports CSV or JSON exports from Firefox,
 Chrome, Edge, Brave, Safari, Proton Pass, Bitwarden and KeePassXC (export

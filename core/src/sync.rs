@@ -4,6 +4,10 @@
 //! Plugins never see the account or the crypto: they read and write entries
 //! filtered by title prefix (`b_` bookmarks, `p_` passwords, ...).
 //!
+//! No service is ever contacted until you set up sync yourself (create an
+//! account or enter one): until then entries are kept on this device only,
+//! sealed with the vault's key, and go up with the first sync.
+//!
 //! Wire format (compatible with the official xBrowserSync apps, v1.5+):
 //!   key  = PBKDF2-HMAC-SHA256(password, salt = sync id, 250 000 rounds, 32 bytes)
 //!   blob = base64(iv[16] || AES-256-GCM(key, iv, lzutf8(json)))
@@ -176,8 +180,7 @@ impl Sync {
 
     /// All bookmark entries whose title starts with `prefix`.
     pub async fn list(self: &Rc<Self>, prefix: &str) -> Result<Vec<Json>, String> {
-        if self.account().is_none() {
-            // Nothing synced yet; don't create an account just to read.
+        if self.account().is_none() && !vault::get().is_open() {
             return Ok(Vec::new());
         }
         self.ensure_loaded().await?;
@@ -186,7 +189,7 @@ impl Sync {
             let state = self.state.borrow();
             let s = state.as_ref().ok_or("sync data unavailable")?;
             collect(&s.local, prefix, &mut out);
-            s.checked.is_none_or(|t| t.elapsed() > FRESH_FOR)
+            s.checked.is_none_or(|t| t.elapsed() > FRESH_FOR) && self.account().is_some()
         };
         if stale {
             self.refresh_in_background();
@@ -204,7 +207,7 @@ impl Sync {
         out
     }
 
-    /// Add an entry; creates an account on the default service if needed.
+    /// Add an entry (on this device only while sync isn't set up).
     pub async fn add(self: &Rc<Self>, entry: Json) -> Result<i64, String> {
         self.prepare_write().await?;
         let id = {
@@ -234,13 +237,10 @@ impl Sync {
     }
 
     async fn prepare_write(self: &Rc<Self>) -> Result<(), String> {
-        // Locked, there's no account to see: making one would replace yours.
         if !vault::get().is_open() {
             return Err(vault::LOCKED.into());
         }
-        if self.account().is_none() {
-            self.create_account(DEFAULT_SERVICE).await?;
-        }
+        // No account is made for you: without one, writes stay here.
         self.ensure_loaded().await
     }
 
@@ -250,10 +250,18 @@ impl Sync {
             let mut state = self.state.borrow_mut();
             let s = state.as_mut().ok_or("sync data unavailable")?;
             apply_op(&mut s.local, &op)?;
-            s.pending.push(op);
+            if self.account().is_some() {
+                s.pending.push(op);
+            } else {
+                s.base = s.local.clone();
+            }
         }
         self.changed();
-        self.schedule_flush();
+        if self.account().is_some() {
+            self.schedule_flush();
+        } else {
+            self.save_local();
+        }
         Ok(())
     }
 
@@ -270,9 +278,21 @@ impl Sync {
             }
             return Ok(());
         }
+        if self.account().is_none() {
+            // Sync isn't set up: a fresh, empty copy on this device.
+            if !vault::get().is_open() {
+                return Err(vault::LOCKED.into());
+            }
+            *self.state.borrow_mut() =
+                Some(State { base: json!([]), last_updated: String::new(), local: json!([]), pending: Vec::new(), checked: None });
+            return Ok(());
+        }
         let _guard = self.lock().await;
         if self.state.borrow().is_none() {
             self.pull().await?;
+        }
+        if self.pending() > 0 {
+            self.schedule_flush();
         }
         Ok(())
     }
@@ -282,7 +302,7 @@ impl Sync {
     /// vault's key. (Older Wisps kept that derived key in the file as it
     /// was; such a file is read once and written again sealed.)
     fn load_cache(&self) -> bool {
-        let Some(account) = self.account() else { return false };
+        let Some(account) = self.account() else { return self.load_local() };
         let Some(vault_key) = vault::get().data_key() else { return false };
         let Ok(text) = fs::read_to_string(cache_path()) else { return false };
         let Ok(file) = serde_json::from_str::<Json>(&text) else { return false };
@@ -322,6 +342,22 @@ impl Sync {
             self.save_cache();
         }
         true
+    }
+
+    /// Entries kept on this device while sync isn't set up, sealed with the
+    /// vault's key.
+    fn load_local(&self) -> bool {
+        let Some(tree) = read_local() else { return false };
+        *self.state.borrow_mut() =
+            Some(State { base: tree.clone(), last_updated: String::new(), local: tree, pending: Vec::new(), checked: None });
+        true
+    }
+
+    fn save_local(&self) {
+        let Some(vault_key) = vault::get().data_key() else { return };
+        let Some(tree) = self.state.borrow().as_ref().map(|s| s.local.to_string()) else { return };
+        let Ok(sealed) = encrypt(&vault_key, &tree) else { return };
+        let _ = vault::write_private(&local_path(), &json!({ "sealed": sealed }).to_string());
     }
 
     fn save_cache(&self) {
@@ -385,11 +421,19 @@ impl Sync {
         } else {
             serde_json::from_str(&decrypt(&key, blob)?).map_err(|e| format!("sync data is not valid JSON: {e}"))?
         };
-        let pending = self.state.borrow_mut().as_mut().map(|s| std::mem::take(&mut s.pending)).unwrap_or_default();
+        let mut pending = self.state.borrow_mut().as_mut().map(|s| std::mem::take(&mut s.pending)).unwrap_or_default();
+        // What was kept on this device before sync was set up goes up too.
+        let carried = read_local();
+        if let Some(tree) = &carried {
+            pending.extend(adds_for(tree));
+        }
         let (local, pending) = replay(&base, pending);
         let last_updated = data["lastUpdated"].as_str().unwrap_or("").to_string();
         *self.state.borrow_mut() = Some(State { base, last_updated, local, pending, checked: Some(Instant::now()) });
         self.save_cache();
+        if carried.is_some() {
+            vault::wipe(&local_path());
+        }
         self.changed();
         Ok(())
     }
@@ -686,6 +730,38 @@ fn cache_path() -> PathBuf {
     config::data_dir().join("sync-cache.json")
 }
 
+/// Entries kept before sync was set up.
+fn local_path() -> PathBuf {
+    config::data_dir().join("sync-local.json")
+}
+
+fn read_local() -> Option<Json> {
+    let vault_key = vault::get().data_key()?;
+    let text = fs::read_to_string(local_path()).ok()?;
+    let file: Json = serde_json::from_str(&text).ok()?;
+    let tree = decrypt(&vault_key, file["sealed"].as_str()?).ok()?;
+    serde_json::from_str(&tree).ok()
+}
+
+/// Writes that add every entry of `tree`, in order.
+fn adds_for(tree: &Json) -> Vec<Json> {
+    let mut entries = Vec::new();
+    collect(tree, "", &mut entries);
+    entries
+        .into_iter()
+        .map(|e| {
+            let mut entry = json!({ "title": e["title"], "url": e["url"] });
+            if e["description"].is_string() {
+                entry["description"] = e["description"].clone();
+            }
+            if e["tags"].as_array().is_some_and(|t| !t.is_empty()) {
+                entry["tags"] = e["tags"].clone();
+            }
+            json!({ "op": "add", "id": e["id"], "entry": entry })
+        })
+        .collect()
+}
+
 /// Apply one pending write to a tree.
 fn apply_op(tree: &mut Json, op: &Json) -> Result<(), String> {
     let id = op["id"].as_i64().ok_or("write without an id")?;
@@ -891,6 +967,25 @@ mod tests {
         // Can't move, or move next to, another plugin's entries.
         assert!(apply_op(&mut tree, &json!({ "op": "move", "id": 5, "target": 2, "prefix": px })).is_err());
         assert!(apply_op(&mut tree, &json!({ "op": "move", "id": 2, "target": 5, "prefix": px })).is_err());
+    }
+
+    #[test]
+    fn entries_kept_here_go_up_with_the_first_sync() {
+        let px = json!(["b_"]);
+        let mut local = json!([]);
+        apply_op(&mut local, &json!({ "op": "add", "id": 2, "entry": { "title": "b_a", "url": "https://a" } })).unwrap();
+        apply_op(&mut local, &json!({ "op": "add", "id": 3, "entry": { "title": "p_x", "url": "https://x", "description": "d" } })).unwrap();
+        apply_op(&mut local, &json!({ "op": "update", "id": 2, "fields": { "tags": ["t"] }, "prefix": px })).unwrap();
+        // The account already has an entry with id 2.
+        let base = json!([{ "id": 1, "title": "[xbs] Other", "children": [{ "id": 2, "title": "b_old", "url": "https://old" }] }]);
+        let (tree, kept) = replay(&base, adds_for(&local));
+        assert_eq!(kept.len(), 2);
+        let mut out = vec![];
+        collect(&tree, "", &mut out);
+        let titles: Vec<&str> = out.iter().map(|e| e["title"].as_str().unwrap()).collect();
+        assert_eq!(titles, ["b_old", "b_a", "p_x"]);
+        assert_eq!(out[1]["tags"], json!(["t"]));
+        assert_eq!(out[2]["description"], "d");
     }
 
     #[test]

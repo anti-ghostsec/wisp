@@ -89,6 +89,10 @@ security fixes reach Wisp, so move to each one.
     connected Gecko is pointed at a port nothing listens on: nothing loads,
     and nothing ever goes around it.
   - *Orbot*: through the Orbot app's SOCKS port instead, the same way.
+  - Changing the route clears cookies, site storage and caches first, so a
+    site can't follow you from one route to the other, and pages load again
+    only once Gecko has the new route's settings. On Tor (built in or
+    Orbot) Gecko's *resist fingerprinting* is on too.
 - **Screen privacy**: no screenshots or screen recordings of Wisp, and a
   blank card in the recent apps (*Allow screenshots of Wisp* in Settings
   turns it off). With a Wisp password, the vault locks again after five

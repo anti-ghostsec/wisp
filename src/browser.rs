@@ -55,6 +55,9 @@ pub struct Shared {
     /// Optional history and saved tabs.
     pub state: Rc<Store>,
     session_save_queued: Cell<bool>,
+    /// Whether the video or sound just right-clicked plays on a loop, as
+    /// page_fixes.js says it (None: not said, or no media there).
+    media_loop: Cell<Option<bool>>,
     /// A drag is in progress somewhere in Wisp.
     drag_active: Cell<bool>,
     /// What a drop decided, run once the drag has fully ended (see `after_drag`).
@@ -112,7 +115,7 @@ impl PluginUi for UiBridge {
     fn go(&self, url: &str) {
         let Some(win) = self.0.upgrade().and_then(|s| s.last_window()) else { return };
         match win.current_tab() {
-            Some(tab) => win.view_of(&tab).load_uri(url),
+            Some(tab) => win.navigate(&tab, url),
             None => {
                 win.new_tab(Some(url), None, true);
             }
@@ -198,11 +201,21 @@ impl Shared {
             downloads: Downloads::new(),
             state: Store::new(),
             session_save_queued: Cell::new(false),
+            media_loop: Cell::new(None),
             drag_active: Cell::new(false),
             after_drag: RefCell::new(Vec::new()),
             windows: RefCell::new(Vec::new()),
         });
         shared.watch_downloads();
+        // The right-clicked video's Loop, said before its menu is made, so
+        // the menu can show it's on. Only Wisp's page fixes see the handler.
+        shared.ucm.register_script_message_handler("wisploop", Some("wisp-page-fixes"));
+        let weak = Rc::downgrade(&shared);
+        shared.ucm.connect_script_message_received(Some("wisploop"), move |_, value| {
+            if let Some(shared) = weak.upgrade() {
+                shared.media_loop.set(value.is_boolean().then(|| value.to_boolean()));
+            }
+        });
         let weak = Rc::downgrade(&shared);
         shared.sync.connect_changed(move || {
             let Some(shared) = weak.upgrade() else { return };
@@ -659,6 +672,61 @@ impl Shared {
         }
     }
 
+    /// Plugins of your own that would be on but that you haven't allowed
+    /// yet, or that declare something new: ask about each.
+    pub fn ask_about_new_plugins(self: &Rc<Self>) {
+        let waiting = self.plugins.to_review(&self.config.borrow());
+        for p in waiting {
+            self.review_plugin(&p, |_| {});
+        }
+    }
+
+    /// Ask before a plugin of your own runs, showing what it declares it
+    /// will do. Nobody has checked it, so it's off unless you say so;
+    /// `done(true)` once it's allowed and on.
+    pub fn review_plugin(self: &Rc<Self>, p: &Rc<plugins::Plugin>, done: impl FnOnce(bool) + 'static) {
+        let name = p.manifest.name.clone();
+        let id = p.manifest.id.clone();
+        if let Some(why) = self.plugins.refused(&id) {
+            let dialog = gtk::AlertDialog::builder()
+                .message(format!("{name} can't be turned on"))
+                .detail(format!("A signing key is set (plugin_signing_key), and this plugin isn't signed with it: {why}."))
+                .buttons(["Close"])
+                .build();
+            dialog.show(self.last_window().map(|w| w.window.clone()).as_ref());
+            return done(false);
+        }
+        let declared: Vec<String> = p.manifest.declaration().iter().map(|l| format!("• {l}")).collect();
+        let changed = self.config.borrow().approved_plugins.contains_key(&id);
+        let dialog = gtk::AlertDialog::builder()
+            .message(if changed { format!("{name} changed what it may do") } else { format!("Turn on {name}?") })
+            .detail(format!(
+                "{}\n\nIt says it will:\n{}\n\nNobody has checked this plugin: it comes from your own plugins folder, not with Wisp. Turn it on only if you trust where it came from.",
+                p.dir.display(),
+                declared.join("\n")
+            ))
+            .buttons(["Keep Off", "Turn On"])
+            .cancel_button(0)
+            .default_button(0)
+            .build();
+        let shared = self.clone();
+        let parent = self.last_window().map(|w| w.window.clone());
+        dialog.choose(parent.as_ref(), None::<&gio::Cancellable>, move |choice| {
+            if choice == Ok(1) {
+                shared.plugins.approve(&id, &shared.config);
+                shared.plugins.set_enabled(&id, true, &shared.config);
+                done(true);
+            } else {
+                // Off until you turn it on yourself: not asked at every start.
+                let mut cfg = shared.config.borrow_mut();
+                cfg.plugins.insert(id, false);
+                cfg.save();
+                drop(cfg);
+                done(false);
+            }
+        });
+    }
+
     /// Open links handed over by another launch (an app opening a file or
     /// link) as tabs of the window in use, the first one shown.
     pub fn open_in_tabs(&self, uris: &[String]) -> Option<Rc<BrowserWindow>> {
@@ -687,20 +755,27 @@ impl Shared {
         privacy::rewrite_url(uri, &self.config.borrow(), |site| allowed.contains(site))
     }
 
-    /// Bring the content filter that upgrades http:// in line with the
-    /// HTTPS-only setting and the sites allowed over HTTP; `then` runs once
-    /// it's in force.
+    /// Bring Wisp's own content filter (the one that upgrades http://, and
+    /// blocks `<a ping>`) in line with the HTTPS-only setting and the sites
+    /// allowed over HTTP; `then` runs once it's in force.
     fn update_https_filter(self: &Rc<Self>, then: impl FnOnce() + 'static) {
-        let rules = self.config.borrow().https_only.then(|| {
+        let rules = {
             let mut allowed: Vec<String> = self.http_allowed.borrow().iter().cloned().collect();
             allowed.sort();
-            privacy::https_filter(&allowed)
-        });
+            Some(privacy::own_filter(self.config.borrow().https_only, &allowed))
+        };
         let plugins = self.plugins.clone();
         glib::spawn_future_local(async move {
             plugins.set_own_filter(rules).await;
             then();
         });
+    }
+
+    /// A link as it's shared: without its tracking parameters, if they're
+    /// taken off pages.
+    fn link_to_share(&self, uri: &str) -> String {
+        let strip = self.config.borrow().strip_tracking_params;
+        strip.then(|| privacy::strip_params(uri)).flatten().unwrap_or_else(|| uri.to_string())
     }
 
     /// Turn what the user typed into a URI.
@@ -1142,7 +1217,7 @@ impl BrowserWindow {
             if !(uri.starts_with("https://") || uri.starts_with("http://")) {
                 return w.share_failed("Only web pages can be shared.".into());
             }
-            if let Err(e) = share::link(&uri) {
+            if let Err(e) = share::link(&w.shared.link_to_share(&uri)) {
                 w.share_failed(e);
             }
         }));
@@ -1354,8 +1429,9 @@ impl BrowserWindow {
             None => {
                 service.set_text(sync::DEFAULT_SERVICE);
                 status.set_text(
-                    "Not set up yet. An account is created for you automatically the first time \
-                     you save a bookmark or password, or enter your own details above.",
+                    "Not set up: bookmarks and passwords stay on this computer, and no sync service \
+                     is contacted. \"Create new account\" makes one on the service above; \"Use this \
+                     account\" connects to yours. Either sends what's kept here, encrypted.",
                 );
             }
         }
@@ -1588,9 +1664,16 @@ impl BrowserWindow {
         let clear = gtk::Button::with_label("Clear cookies, site data and history");
         let session = shared.session.clone();
         let state = shared.state.clone();
+        let sh = Rc::downgrade(shared);
         clear.connect_clicked(move |b| {
             state.clear_history();
             state.clear_session();
+            // What sites were let do this run goes too: plain HTTP, pop-ups.
+            if let Some(shared) = sh.upgrade() {
+                shared.http_allowed.borrow_mut().clear();
+                shared.popup_allowed.borrow_mut().clear();
+                shared.update_https_filter(|| {});
+            }
             if let Some(mgr) = session.website_data_manager() {
                 b.set_sensitive(false);
                 let b = glib::SendWeakRef::from(b.downgrade());
@@ -1658,8 +1741,22 @@ impl BrowserWindow {
                 row.append(&toolbar);
             }
             let switch = gtk::Switch::builder().active(p.enabled.get()).valign(gtk::Align::Center).build();
-            let (w, l, pid) = (Rc::downgrade(self), list.clone(), id.clone());
+            let (w, l, pid, plugin) = (Rc::downgrade(self), list.clone(), id.clone(), p.clone());
             switch.connect_state_set(move |_, on| {
+                // Not allowed yet: ask first, and stay off unless allowed.
+                if on && !plugin.trusted.get() {
+                    if let Some(win) = w.upgrade() {
+                        let (w2, l) = (Rc::downgrade(&win), l.clone());
+                        win.shared.review_plugin(&plugin, move |allowed| {
+                            let Some(win) = w2.upgrade() else { return };
+                            if allowed && let Some(v) = win.current_view() {
+                                v.reload();
+                            }
+                            glib::idle_add_local_once(move || win.fill_plugin_list(&l));
+                        });
+                    }
+                    return glib::Propagation::Stop;
+                }
                 if let Some(win) = w.upgrade() {
                     win.shared.plugins.set_enabled(&pid, on, &win.shared.config);
                     if let Some(v) = win.current_view() {
@@ -1884,7 +1981,7 @@ impl BrowserWindow {
                 return true;
             }
             if let Some(win) = w.upgrade() {
-                adjust_media_menu(menu);
+                adjust_media_menu(menu, win.shared.media_loop.take());
                 win.adjust_link_menu(menu, hit);
                 win.add_plugin_menu_items(view, menu, hit);
             }
@@ -2045,6 +2142,22 @@ impl BrowserWindow {
                 win.new_tab(Some(&uri), None, false);
                 return true;
             }
+
+            // A clicked link loses its tracking parameters before it's
+            // followed, so the tracked address is never sent. Clicks only:
+            // WebKit doesn't say which frame other navigations are for, and
+            // a frame's own load mustn't take over the tab. What gets past
+            // this (a redirect, a page's script) is cleaned once it starts.
+            if action.is_user_gesture()
+                && action.navigation_type() == NavigationType::LinkClicked
+                && action.frame_name().is_none_or(|name| name.is_empty())
+                && win.shared.config.borrow().strip_tracking_params
+                && let Some(clean) = privacy::strip_params(&uri)
+            {
+                decision.ignore();
+                win.navigate(&tab, &clean);
+                return true;
+            }
             false
         });
 
@@ -2088,7 +2201,7 @@ impl BrowserWindow {
 
         view.connect_web_process_terminated(|v, reason| {
             let uri = v.uri().map(|s| s.to_string()).unwrap_or_default();
-            eprintln!("wisp: web process for {uri} terminated: {reason:?}");
+            eprintln!("wisp: a tab's web process terminated: {reason:?}");
             let html = format!(
                 "<title>Tab crashed</title><body style='font-family:sans-serif;padding:3em'>\
                  <h2>This page stopped ({reason:?})</h2><p>Press Ctrl+R to reload.</p>"
@@ -2112,10 +2225,10 @@ impl BrowserWindow {
             return;
         };
         let launch = {
-            let uri = uri.to_string();
+            let (uri, scheme) = (uri.to_string(), scheme.clone());
             move || {
                 if let Err(e) = app.launch_uris(&[&uri], None::<&gio::AppLaunchContext>) {
-                    eprintln!("wisp: opening {uri}: {e}");
+                    eprintln!("wisp: opening a {scheme}: link: {e}");
                 }
             }
         };
@@ -2361,7 +2474,7 @@ impl BrowserWindow {
         let w = Rc::downgrade(self);
         view.connect_context_menu(move |_, menu, hit| {
             if let Some(win) = w.upgrade() {
-                adjust_media_menu(menu);
+                adjust_media_menu(menu, win.shared.media_loop.take());
                 win.adjust_link_menu(menu, hit);
             }
             false
@@ -2427,8 +2540,9 @@ impl BrowserWindow {
             let (w, uri, page) = (Rc::downgrade(self), uri.to_string(), page.clone());
             action.connect_activate(move |_, _| {
                 let (w, uri, page) = (w.clone(), uri.clone(), page.clone());
+                let Some(how) = w.upgrade().map(|win| win.picture_fetch()) else { return };
                 glib::spawn_future_local(async move {
-                    if let Err(e) = share::picture(&uri, &page).await
+                    if let Err(e) = share::picture(&uri, &page, &how).await
                         && let Some(win) = w.upgrade()
                     {
                         win.share_failed(e);
@@ -2443,9 +2557,8 @@ impl BrowserWindow {
             let action = gio::SimpleAction::new("share-link", None);
             let w = Rc::downgrade(self);
             action.connect_activate(move |_, _| {
-                if let Err(e) = share::link(&uri)
-                    && let Some(win) = w.upgrade()
-                {
+                let Some(win) = w.upgrade() else { return };
+                if let Err(e) = share::link(&win.shared.link_to_share(&uri)) {
                     win.share_failed(e);
                 }
             });
@@ -2457,6 +2570,22 @@ impl BrowserWindow {
                 menu.append(&item);
             }
         }
+    }
+
+    /// How Share Picture fetches a picture: with the browser's user agent,
+    /// and HTTPS-only and tracking parameters as for pages.
+    fn picture_fetch(self: &Rc<Self>) -> share::Fetch {
+        let user_agent = self
+            .current_view()
+            .and_then(|v| WebViewExt::settings(&v))
+            .and_then(|s| s.user_agent())
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| "Mozilla/5.0".into());
+        let shared = Rc::downgrade(&self.shared);
+        let rewrite = Box::new(move |uri: &str| {
+            shared.upgrade().and_then(|s| s.rewrite(uri)).unwrap_or_else(|| uri.to_string())
+        });
+        share::Fetch { user_agent, rewrite }
     }
 
     fn share_failed(&self, why: String) {
@@ -2967,39 +3096,76 @@ impl BrowserWindow {
         dialog.present();
     }
 
-    /// Copy a plugin folder (one with a plugin.json) into the plugin folder.
+    /// Copy a plugin folder (one with a plugin.json) into the plugin folder,
+    /// once you've seen what it declares and said yes; it's allowed as it
+    /// declares that.
     fn install_plugin(self: &Rc<Self>) {
         let dialog = gtk::FileDialog::builder().title("Choose a plugin folder").modal(true).build();
         let w = Rc::downgrade(self);
         dialog.select_folder(Some(&self.window), None::<&gio::Cancellable>, move |res| {
             let (Some(win), Some(src)) = (w.upgrade(), res.ok().and_then(|f| f.path())) else { return };
-            let result = (|| -> Result<(String, Option<String>), String> {
+            let read = (|| -> Result<plugins::Manifest, String> {
                 let manifest = std::fs::read_to_string(src.join("plugin.json"))
                     .map_err(|_| "That folder has no plugin.json, so it isn't a Wisp plugin.".to_string())?;
-                let manifest: serde_json::Value =
+                let manifest: plugins::Manifest =
                     serde_json::from_str(&manifest).map_err(|e| format!("Its plugin.json is not valid: {e}"))?;
-                let id = manifest["id"].as_str().filter(|id| !id.is_empty() && !id.contains(['/', '\\', '.']));
-                let id = id.ok_or("Its plugin.json has no usable \"id\".")?;
-                let dest = plugins::user_plugin_dir().join(id);
-                if dest.exists() {
-                    std::fs::remove_dir_all(&dest).map_err(|e| e.to_string())?;
+                if manifest.id.is_empty() || manifest.id.contains(['/', '\\', '.']) {
+                    return Err("Its plugin.json has no usable \"id\".".into());
                 }
-                copy_dir(&src, &dest).map_err(|e| e.to_string())?;
-                let name = manifest["name"].as_str().unwrap_or(id).to_string();
-                // A built-in plugin keeps its id unless you choose otherwise.
-                let builtin = win.shared.plugins.get(id).filter(|p| !p.dir.starts_with(plugins::user_plugin_dir()));
-                Ok((name, builtin.map(|p| p.manifest.name.clone())))
+                Ok(manifest)
             })();
-            let restart = "Restart Wisp (Ctrl+Q, then start it again) to load it.";
-            let (message, detail) = match result {
-                Ok((name, None)) => (format!("Installed {name}"), restart.to_string()),
-                Ok((name, Some(builtin))) => (
-                    format!("Installed {name}"),
-                    format!("{restart} It has the same id as the built-in {builtin} plugin, so Wisp will ask whether to use it instead."),
-                ),
-                Err(e) => ("Couldn't install the plugin".to_string(), e),
+            let manifest = match read {
+                Ok(m) => m,
+                Err(e) => {
+                    gtk::AlertDialog::builder().message("Couldn't install the plugin").detail(e).build().show(Some(&win.window));
+                    return;
+                }
             };
-            gtk::AlertDialog::builder().message(message).detail(detail).build().show(Some(&win.window));
+            let declared: Vec<String> = manifest.declaration().iter().map(|l| format!("• {l}")).collect();
+            let ask = gtk::AlertDialog::builder()
+                .message(format!("Install {}?", manifest.name))
+                .detail(format!(
+                    "It says it will:\n{}\n\nNobody has checked this plugin. Install it only if you trust where it came from.",
+                    declared.join("\n")
+                ))
+                .buttons(["Cancel", "Install"])
+                .cancel_button(0)
+                .default_button(0)
+                .build();
+            let w = Rc::downgrade(&win);
+            ask.choose(Some(&win.window), None::<&gio::Cancellable>, move |choice| {
+                let Some(win) = w.upgrade() else { return };
+                if choice != Ok(1) {
+                    return;
+                }
+                let id = manifest.id.clone();
+                let result = (|| -> Result<Option<String>, String> {
+                    let dest = plugins::user_plugin_dir().join(&id);
+                    if dest.exists() {
+                        std::fs::remove_dir_all(&dest).map_err(|e| e.to_string())?;
+                    }
+                    copy_dir(&src, &dest).map_err(|e| e.to_string())?;
+                    {
+                        let mut cfg = win.shared.config.borrow_mut();
+                        cfg.approved_plugins.insert(id.clone(), manifest.declaration_key());
+                        cfg.save();
+                    }
+                    // A built-in plugin keeps its id unless you choose otherwise.
+                    let builtin = win.shared.plugins.get(&id).filter(|p| p.built_in);
+                    Ok(builtin.map(|p| p.manifest.name.clone()))
+                })();
+                let name = &manifest.name;
+                let restart = "Restart Wisp (Ctrl+Q, then start it again) to load it.";
+                let (message, detail) = match result {
+                    Ok(None) => (format!("Installed {name}"), restart.to_string()),
+                    Ok(Some(builtin)) => (
+                        format!("Installed {name}"),
+                        format!("{restart} It has the same id as the built-in {builtin} plugin, so Wisp will ask whether to use it instead."),
+                    ),
+                    Err(e) => ("Couldn't install the plugin".to_string(), e),
+                };
+                gtk::AlertDialog::builder().message(message).detail(detail).build().show(Some(&win.window));
+            });
         });
     }
 
@@ -3288,12 +3454,12 @@ fn is_cancellation(error: &glib::Error) -> bool {
 /// A video's menu in plain words: "Loop" and "Fullscreen" for WebKit's
 /// "Toggle Media Loop Playback" and "Switch Video to Fullscreen" (the same
 /// actions under a shorter name), and nothing for showing the page's own
-/// controls or the media statistics.
-fn adjust_media_menu(menu: &webkit6::ContextMenu) {
+/// controls or the media statistics. Loop says when it's on (`looping`).
+fn adjust_media_menu(menu: &webkit6::ContextMenu, looping: Option<bool>) {
     use webkit6::ContextMenuAction as A;
     for (pos, item) in menu.items().iter().enumerate().rev() {
         let label = match item.stock_action() {
-            A::ToggleMediaLoop => "Loop",
+            A::ToggleMediaLoop => loop_label(looping),
             A::EnterVideoFullscreen => "Fullscreen",
             A::ToggleMediaControls => {
                 menu.remove(item);
@@ -3307,6 +3473,15 @@ fn adjust_media_menu(menu: &webkit6::ContextMenu) {
         };
         menu.remove(item);
         menu.insert(&webkit6::ContextMenuItem::from_stock_action_with_label(item.stock_action(), label), pos as i32);
+    }
+}
+
+/// The Loop item's name: a red mark when the video is looping.
+fn loop_label(looping: Option<bool>) -> &'static str {
+    if looping == Some(true) {
+        "\u{1F534} Loop (on)"
+    } else {
+        "Loop"
     }
 }
 
@@ -3430,6 +3605,13 @@ mod tests {
         assert_eq!(short_address("wisp:start"), "wisp:start");
     }
     use super::*;
+
+    #[test]
+    fn loop_says_when_its_on() {
+        assert!(loop_label(Some(true)).contains("(on)"));
+        assert_eq!(loop_label(Some(false)), "Loop");
+        assert_eq!(loop_label(None), "Loop");
+    }
 
     #[test]
     fn continue_over_http_needs_the_failure_pages_token() {

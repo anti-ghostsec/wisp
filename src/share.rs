@@ -64,15 +64,28 @@ fn spawn(mut cmd: Command, input: Option<&[u8]>) -> Result<(), String> {
     Ok(())
 }
 
+/// How a picture is fetched to share it: as the browser asks for pages.
+pub struct Fetch {
+    /// The browser's user agent, so the request looks like the page's own.
+    pub user_agent: String,
+    /// The address actually asked for, for each address on the way
+    /// (redirects too): HTTPS-only and without tracking parameters, as
+    /// pages get them.
+    pub rewrite: Box<dyn Fn(&str) -> String>,
+}
+
+/// The most redirects followed for a picture.
+const MAX_REDIRECTS: usize = 5;
+
 /// Share the picture at `uri`, shown on the page at `page`: fetched again
 /// into memory (in a session of its own, with no cookies, telling the
 /// picture's server only which site it's on), or taken from a `data:`
 /// address as it is.
-pub async fn picture(uri: &str, page: &str) -> Result<(), String> {
+pub async fn picture(uri: &str, page: &str, how: &Fetch) -> Result<(), String> {
     let (data, mime) = if let Some(rest) = uri.strip_prefix("data:") {
         from_data_uri(rest)?
     } else if uri.starts_with("https://") || uri.starts_with("http://") {
-        fetch(uri, page).await?
+        fetch(uri, page, how).await?
     } else {
         return Err("this picture can't be shared (it only exists inside the page)".into());
     };
@@ -82,21 +95,45 @@ pub async fn picture(uri: &str, page: &str) -> Result<(), String> {
     bytes(&picture_name(uri, mime.as_deref()), &data)
 }
 
-async fn fetch(uri: &str, page: &str) -> Result<(Vec<u8>, Option<String>), String> {
+async fn fetch(uri: &str, page: &str, how: &Fetch) -> Result<(Vec<u8>, Option<String>), String> {
     let session = soup::Session::new();
     session.set_timeout(30);
-    session.set_user_agent("Mozilla/5.0");
-    let msg = soup::Message::new("GET", uri).map_err(|e| format!("bad address: {e}"))?;
-    if let Some(origin) = origin(page)
-        && let Some(headers) = msg.request_headers()
-    {
-        // Some sites only serve their pictures to their own pages.
-        headers.append("Referer", &format!("{origin}/"));
-    }
-    let body = session
-        .send_and_read_future(&msg, glib::Priority::DEFAULT)
-        .await
-        .map_err(|e| format!("couldn't fetch the picture: {e}"))?;
+    session.set_user_agent(&how.user_agent);
+    let mut uri = (how.rewrite)(uri);
+    let mut hops = 0;
+    let (msg, body) = loop {
+        if !(uri.starts_with("https://") || uri.starts_with("http://")) {
+            return Err("the picture's server sent it somewhere that isn't a web address".into());
+        }
+        let msg = soup::Message::new("GET", &uri).map_err(|e| format!("bad address: {e}"))?;
+        // Redirects are followed here, each one rewritten as the first.
+        msg.add_flags(soup::MessageFlags::NO_REDIRECT);
+        if let Some(headers) = msg.request_headers() {
+            headers.append("Accept", "image/webp,image/avif,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5");
+            // Some sites only serve their pictures to their own pages.
+            if let Some(origin) = origin(page) {
+                headers.append("Referer", &format!("{origin}/"));
+            }
+        }
+        let body = session
+            .send_and_read_future(&msg, glib::Priority::DEFAULT)
+            .await
+            .map_err(|e| format!("couldn't fetch the picture: {e}"))?;
+        let status = msg.status().into_glib();
+        let location = msg.response_headers().and_then(|h| h.one("Location"));
+        match location {
+            Some(to) if (300..400).contains(&status) => {
+                hops += 1;
+                if hops > MAX_REDIRECTS {
+                    return Err("the picture's server kept sending it elsewhere".into());
+                }
+                let next = glib::Uri::resolve_relative(Some(&uri), &to, glib::UriFlags::NONE)
+                    .map_err(|e| format!("the picture's server sent a bad address: {e}"))?;
+                uri = (how.rewrite)(&next);
+            }
+            _ => break (msg, body),
+        }
+    };
     let status = msg.status().into_glib();
     if !(200..300).contains(&status) {
         return Err(format!("the picture's server answered {status}"));
@@ -262,17 +299,20 @@ mod tests {
             v
         };
 
+        let how = Fetch { user_agent: "Mozilla/5.0 Test".into(), rewrite: Box::new(|u| u.replace("&utm_source=x", "")) };
         glib::MainContext::default()
-            .block_on(picture(&format!("http://127.0.0.1:{port}/photos/cat"), "https://news.example.com/story?id=1"))
+            .block_on(picture(&format!("http://127.0.0.1:{port}/photos/cat?a=1&utm_source=x"), "https://news.example.com/story?id=1", &how))
             .unwrap();
         let head = server.join().unwrap();
         assert!(head.contains("Referer: https://news.example.com/\r\n"), "{head}");
+        assert!(head.starts_with("GET /photos/cat?a=1 "), "{head}");
+        assert!(head.contains("User-Agent: Mozilla/5.0 Test\r\n"), "{head}");
         assert!(!head.to_ascii_lowercase().contains("cookie"), "{head}");
         wait("got.data");
         assert_eq!(read("got.data"), png);
         assert_eq!(String::from_utf8(read("got.args")).unwrap(), "--stdin\ncat.png\n");
 
-        glib::MainContext::default().block_on(picture("data:image/gif;base64,R0lGODlh", "https://a.b/")).unwrap();
+        glib::MainContext::default().block_on(picture("data:image/gif;base64,R0lGODlh", "https://a.b/", &how)).unwrap();
         wait("got.data");
         assert_eq!(read("got.data"), b"GIF89a");
         assert_eq!(String::from_utf8(read("got.args")).unwrap(), "--stdin\npicture.gif\n");
@@ -281,7 +321,7 @@ mod tests {
         wait("got.args");
         assert_eq!(String::from_utf8(read("got.args")).unwrap(), "--url\nhttps://example.com/page\n");
 
-        assert!(glib::MainContext::default().block_on(picture("blob:https://a.b/123", "https://a.b/")).is_err());
+        assert!(glib::MainContext::default().block_on(picture("blob:https://a.b/123", "https://a.b/", &how)).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

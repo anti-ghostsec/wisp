@@ -9,8 +9,8 @@
   define(nav, "hardwareConcurrency", 4);
   define(nav, "deviceMemory", 8);
   define(nav, "maxTouchPoints", 0);
-  define(nav, "doNotTrack", "1");
-  define(nav, "globalPrivacyControl", true);
+  // No Do Not Track or Global Privacy Control here: saying so without
+  // the headers that go with them would only make Wisp stand out.
   if ("getBattery" in nav) define(nav, "getBattery", undefined);
   if ("connection" in nav) define(nav, "connection", undefined);
 

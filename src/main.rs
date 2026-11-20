@@ -15,6 +15,7 @@ mod vault;
 mod bigcopy;
 mod runtime;
 mod share;
+mod signing;
 
 use browser::{BrowserWindow, Shared};
 use gtk::prelude::*;
@@ -81,6 +82,7 @@ fn main() -> glib::ExitCode {
             window.warn_if_outdated();
             if starting {
                 shared.ask_about_shadowed_plugins();
+                shared.ask_about_new_plugins();
             }
             if let Ok(path) = std::env::var("WISP_SCREENSHOT") {
                 let secs = std::env::var("WISP_SCREENSHOT_DELAY").ok().and_then(|s| s.parse().ok()).unwrap_or(8);

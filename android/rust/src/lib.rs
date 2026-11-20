@@ -457,7 +457,8 @@ impl Core {
 
     pub fn set_plugin_enabled(&self, id: String, enabled: bool) -> Result<(), WispError> {
         self.run(move |s| {
-            if let Some(p) = s.plugins.iter().find(|p| p.manifest.id == id) {
+            // Only the plugins that come with Wisp run here.
+            if let Some(p) = s.plugins.iter().find(|p| p.manifest.id == id && (!enabled || p.trusted.get())) {
                 p.enabled.set(enabled);
                 let mut cfg = s.config.borrow_mut();
                 cfg.plugins.insert(id, enabled);

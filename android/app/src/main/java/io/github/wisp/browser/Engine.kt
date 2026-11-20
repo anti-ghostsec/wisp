@@ -177,6 +177,11 @@ object Engine {
             b("gfx.downloadable_fonts.enabled", level != Level.SAFEST),
             b("privacy.fingerprintingProtection", true),
             b("privacy.fingerprintingProtection.pbmode", true),
+            // On Tor, look like every other Tor user as far as Gecko can
+            // (screen size, time zone, fonts, ...). Off the route, it breaks
+            // too many sites for what it gives.
+            b("privacy.resistFingerprinting", tor),
+            b("privacy.resistFingerprinting.pbmode", tor),
             b("geo.enabled", false),
             b("dom.security.https_only_mode_send_http_background_request", false),
             b("network.prefetch-next", false),
@@ -193,6 +198,8 @@ object Engine {
             i("network.proxy.socks_port", socksPort),
             i("network.proxy.socks_version", 5),
             b("network.proxy.socks_remote_dns", true),
+            // Its newer name: names are looked up through Tor, never here.
+            b("network.proxy.socks5_remote_dns", true),
             // Tor not there: fail, never go around it.
             b("network.proxy.failover_direct", !tor),
             i("network.trr.mode", if (tor) 5 else 0),

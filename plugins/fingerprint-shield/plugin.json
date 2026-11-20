@@ -1,7 +1,7 @@
 {
   "id": "fingerprint-shield",
   "name": "Fingerprint Shield",
-  "version": "1.0",
+  "version": "1.1",
   "description": "Reports common, uniform values for device properties that sites use to fingerprint you.",
   "content_scripts": [
     {

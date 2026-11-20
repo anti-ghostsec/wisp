@@ -23,7 +23,10 @@ jobs:
       # Actions and the build image are named by their hash, not by a tag
       # that can be moved to other code: what builds the release that gets
       # signed only changes when this file does.
+      # The token isn't left in .git/config, where the build could read it.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       # Clippy and the tests run first: if either fails, nothing is built.
       - name: Check and build on Debian trixie
@@ -66,23 +69,31 @@ jobs:
   # an Android build that fails never holds up FerroOS's updates. Phones run
   # wisp-android-arm64.apk; wisp-android-x86_64.apk is for the Android
   # emulator. Each is built on its own, so one failing doesn't hold up the other.
-  # Signed with Wisp's Android key (secrets ANDROID_KEYSTORE, base64, and
-  # ANDROID_KEYSTORE_PASSWORD), and checked against android/release-cert.sha256,
-  # so each APK installs over the one before.
+  # The build (Gradle and everything it fetches) never sees the signing key:
+  # it hands the unsigned APK to the next job, which signs it with Wisp's
+  # Android key (secrets ANDROID_KEYSTORE, base64, and
+  # ANDROID_KEYSTORE_PASSWORD) on a runner of its own and checks it against
+  # android/release-cert.sha256, so each APK installs over the one before.
   android:
     needs: linux
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { abi: arm64-v8a, target: aarch64-linux-android, apk: wisp-android-arm64.apk }
-          - { abi: x86_64, target: x86_64-linux-android, apk: wisp-android-x86_64.apk }
+          - { abi: arm64-v8a, target: aarch64-linux-android }
+          - { abi: x86_64, target: x86_64-linux-android }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # The version code counts commits.
           fetch-depth: 0
+          persist-credentials: false
+
+      # gradle-wrapper.jar is the one Gradle publishes, not a changed copy.
+      - uses: gradle/actions/wrapper-validation@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
 
       - name: Build
         run: |
@@ -97,6 +108,34 @@ jobs:
           WISP_VERSION_CODE=$(git rev-list --count "$GITHUB_SHA") WISP_VERSION_NAME="0.1.0-$(echo "$GITHUB_SHA" | cut -c1-7)" \
             android/build-android.sh "${{ matrix.abi }}" release
 
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unsigned-${{ matrix.abi }}
+          path: android/app/build/outputs/apk/release/app-release-unsigned.apk
+          if-no-files-found: error
+          retention-days: 1
+
+  android-sign:
+    needs: android
+    # Each APK whose build went through, even if the other's didn't.
+    if: ${{ !cancelled() && needs.android.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { abi: arm64-v8a, apk: wisp-android-arm64.apk }
+          - { abi: x86_64, apk: wisp-android-x86_64.apk }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: unsigned-${{ matrix.abi }}
+          path: unsigned
+
       - name: Sign
         env:
           APK: ${{ matrix.apk }}
@@ -106,13 +145,18 @@ jobs:
           set -eu
           [ -n "$ANDROID_KEYSTORE" ] || { echo "ANDROID_KEYSTORE isn't set: no APK without a signature" >&2; exit 1; }
           export PATH="$JAVA_HOME_21_X64/bin:$PATH"
+          sdk="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdk" --licenses >/dev/null || true
+          "$sdk" --install "build-tools;36.0.0" >/dev/null
           tools="$ANDROID_HOME/build-tools/36.0.0"
+          # The key exists only for this step, and is gone after it.
           key=$(mktemp)
           trap 'rm -f "$key"' EXIT
           printf '%s' "$ANDROID_KEYSTORE" | base64 -d >"$key"
           WISP_KS_PASS=$(printf '%s' "$ANDROID_KEYSTORE_PASSWORD" | tr -d '\r\n') "$tools/apksigner" sign \
             --ks "$key" --ks-key-alias wisp --ks-pass env:WISP_KS_PASS --key-pass env:WISP_KS_PASS \
-            --out "$APK" android/app/build/outputs/apk/release/app-release-unsigned.apk
+            --out "$APK" unsigned/app-release-unsigned.apk
+          rm -f "$key"
           # Signed with Wisp's key, not some other one.
           got=$("$tools/apksigner" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
           [ "$got" = "$(cat android/release-cert.sha256)" ] || { echo "signed with $got, not Wisp's key" >&2; exit 1; }

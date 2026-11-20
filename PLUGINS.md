@@ -13,6 +13,36 @@ its saved data included, so it is left out: Wisp says so when it starts and
 offers **Use Mine Instead** (remembered in `plugin_overrides` in
 `config.json`; it takes effect from the next start).
 
+Plugins of your own (from your plugins folder or `$WISP_PLUGIN_PATH`) aren't
+checked by anyone, so none runs until you've seen what it declares and said
+yes: **Install plugin…** shows that before it copies anything, and a plugin
+put in the folder by hand is asked about when Wisp starts (or when you turn
+it on). What it declares is the sites its scripts run on (and in which
+world), its `permissions`, `sync_prefixes`, a background script, a `native`
+helper and the filter lists it downloads; what you allowed is kept in
+`approved_plugins` in `config.json`. A new version that declares anything
+else is off again until you allow it again. Wisp holds a plugin to what it
+declared: API calls need their permission, scripts only run where they say,
+synced entries only under their prefixes.
+
+### Signed plugins
+
+To run only plugins signed by you (or someone you trust), set
+`plugin_signing_key` in `config.json` to a [minisign](https://jedisct1.github.io/minisign/)
+public key: the second line of its `.pub` file. A plugin of your own is then
+left off unless its folder holds a `plugin.minisig` over the list of its
+files and their SHA-256 sums; a changed or added file, or a link in the
+folder, leaves it off too. Make a key once with `minisign -G`, then sign a
+plugin with:
+
+```sh
+cd my-plugin
+find . -type f ! -name plugin.minisig -printf '%P\0' | LC_ALL=C sort -z | xargs -0 sha256sum >../my-plugin.contents
+minisign -S -s ~/.minisign/minisign.key -m ../my-plugin.contents -x plugin.minisig
+```
+
+The plugins that come with Wisp aren't checked this way.
+
 ## Manifest
 
 ```json
@@ -139,9 +169,10 @@ Wisp includes an [xBrowserSync](https://www.xbrowsersync.org/) client. All
 plugins share one account, and the data is encrypted on this device before
 upload. Each plugin only sees entries whose titles start with one of its
 `sync_prefixes`. The bundled plugins use `b_` for bookmarks and `p_` for
-passwords. If you never set up an account, one is created automatically on
-the official service the first time a plugin saves something. To use your own
-account, or to sync another device, open ☰ → **Sync account…**.
+passwords. No sync service is contacted until you set up an account in ☰ →
+**Sync account…** (create one, or enter your own to sync another device):
+until then what plugins save is kept on this device only, encrypted with the
+vault's key, and it goes up with the first sync.
 
 Reads come from an encrypted local copy, refreshed from the service in the
 background about once a minute. Writes apply to that copy straight away

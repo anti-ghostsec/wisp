@@ -36,6 +36,17 @@ addEventListener("copy", (e) => {
 // leaves the click to YouTube, for its menu (Copy video URL, Stats...).
 // This listens on the window before the page's own listeners, so YouTube
 // never hears of a plain right-click.
+// Whether the video or sound right-clicked is on a loop, told to Wisp
+// before its menu is made: its Loop item shows when it's on. First of the
+// right-click listeners, so YouTube's below doesn't stop it.
+addEventListener("contextmenu", (e) => {
+  const send = globalThis.webkit && webkit.messageHandlers && webkit.messageHandlers.wisploop;
+  if (!send) return;
+  const isMedia = (el) => el instanceof HTMLMediaElement;
+  // A player's controls often cover its video: what's under the pointer.
+  const media = e.composedPath().find(isMedia) || document.elementsFromPoint(e.clientX, e.clientY).find(isMedia);
+  send.postMessage(media ? media.loop : null);
+}, true);
 const closeYouTubeMenu = () => {
   for (const m of document.querySelectorAll(".ytp-contextmenu")) m.style.display = "none";
 };

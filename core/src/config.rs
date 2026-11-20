@@ -88,6 +88,14 @@ pub struct Config {
     pub plugin_overrides: Vec<String>,
     /// Plugin helper programs you allowed to run, as "plugin-id: command".
     pub allowed_native_helpers: Vec<String>,
+    /// Plugins of your own you allowed, by id: what each declared then
+    /// (`Manifest::declaration_key`). One that declares something else
+    /// stays off until you allow it again.
+    pub approved_plugins: BTreeMap<String, String>,
+    /// A minisign public key (the line after the comment in a .pub file).
+    /// When set, a plugin of your own runs only if its folder is signed
+    /// with it (`plugin.minisig`, see PLUGINS.md).
+    pub plugin_signing_key: Option<String>,
 }
 
 impl Default for Config {
@@ -126,6 +134,8 @@ impl Default for Config {
             toolbar_shown: Vec::new(),
             plugin_overrides: Vec::new(),
             allowed_native_helpers: Vec::new(),
+            approved_plugins: BTreeMap::new(),
+            plugin_signing_key: None,
         }
     }
 }
