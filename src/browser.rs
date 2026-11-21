@@ -584,6 +584,13 @@ impl Shared {
             let rest = rest.split(['?', '#']).next().unwrap_or("");
             let (id, path) = rest.split_once('/').unwrap_or((rest, ""));
             let path = if path.is_empty() { "index.html" } else { path };
+            // Only to the plugin's own pages, or as the page being opened:
+            // a web page can't load, frame or probe plugin files.
+            let from = req.web_view().and_then(|v| v.uri()).map(|u| u.to_string());
+            if from.as_deref() != Some(uri.as_str()) && !may_open_plugin_page(from.as_deref(), &uri) {
+                req.finish_error(&mut glib::Error::new(gio::IOErrorEnum::PermissionDenied, "plugin pages are for Wisp and the plugin only"));
+                return;
+            }
             if path == plugins::BACKGROUND_PAGE && shared.plugins.get(id).is_some_and(|p| p.enabled.get() && p.has_background()) {
                 let html = glib::Bytes::from_static(b"<!doctype html><meta charset=utf-8><title>background</title>");
                 let len = html.len() as i64;
@@ -612,8 +619,11 @@ impl Shared {
             for scheme in ["wisp", plugins::PAGE_SCHEME] {
                 sec.register_uri_scheme_as_secure(scheme);
                 sec.register_uri_scheme_as_no_access(scheme);
-                sec.register_uri_scheme_as_display_isolated(scheme);
             }
+            // Not for plugin pages: their origin is then opaque, and they
+            // couldn't load their own style sheets and pictures. The
+            // handler above and the navigation checks keep web pages out.
+            sec.register_uri_scheme_as_display_isolated("wisp");
         }
     }
 
@@ -2240,6 +2250,17 @@ impl BrowserWindow {
             let Some(action) = nav.navigation_action() else { return false };
             let Some(uri) = action.request().and_then(|r| r.uri()) else { return false };
 
+            // A web page can't take the tab to a plugin's page (which has
+            // the plugin's API). Wisp can (the address bar, plugin buttons
+            // set the tab's address first), and so can Back and Reload.
+            let replay = matches!(action.navigation_type(), NavigationType::BackForward | NavigationType::Reload);
+            if uri.starts_with(plugins::PAGE_SCHEME) && !replay && *tab.uri.borrow() != uri.as_str()
+                && !may_open_plugin_page(v.uri().as_deref(), &uri)
+            {
+                decision.ignore();
+                return true;
+            }
+
             // "Continue over HTTP" on the HTTPS-failure page. Any page can
             // open a wisp-allow-http: link, so it only counts when it carries
             // the token of the failure page this tab is showing, and was
@@ -2315,6 +2336,9 @@ impl BrowserWindow {
             let opener_site = site_of(&opener);
             if is_app_link(&target) {
                 win.open_app_link(&target, &opener);
+                return None;
+            }
+            if target.starts_with(plugins::PAGE_SCHEME) && !may_open_plugin_page(Some(&opener), &target) {
                 return None;
             }
             let is_link = action.navigation_type() == NavigationType::LinkClicked;
@@ -3594,6 +3618,21 @@ use wisp_core::address::{is_app_link, site_of};
 
 /// Settings text to a Config, refusing invalid JSON and unknown names (typos
 /// would otherwise be silently ignored).
+/// Whether a page at `from` may open or load the plugin page `target`:
+/// only Wisp's own pages (none yet, blank, wisp:) and the same plugin's.
+fn may_open_plugin_page(from: Option<&str>, target: &str) -> bool {
+    let plugin = |u: &str| {
+        u.strip_prefix(plugins::PAGE_SCHEME)
+            .and_then(|r| r.strip_prefix("://"))
+            .map(|r| r.split(['/', '?', '#']).next().unwrap_or("").to_ascii_lowercase())
+    };
+    match from {
+        None | Some("") | Some("about:blank") => true,
+        Some(f) if f.starts_with("wisp:") => true,
+        Some(f) => plugin(f).is_some() && plugin(f) == plugin(target),
+    }
+}
+
 fn parse_settings(text: &str) -> Result<Config, String> {
     let value: serde_json::Value =
         serde_json::from_str(text).map_err(|e| format!("Line {}, column {}: {e}", e.line(), e.column()))?;
@@ -3828,6 +3867,17 @@ mod tests {
         let (a, b) = (random_token(), random_token());
         assert_eq!(a.len(), 32);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn web_pages_cant_open_plugin_pages() {
+        let page = "wisp-plugin://vidgrab/popup/popup.css";
+        assert!(may_open_plugin_page(None, page));
+        assert!(may_open_plugin_page(Some("wisp:start"), page));
+        assert!(may_open_plugin_page(Some("wisp-plugin://vidgrab/popup/popup.html"), page));
+        assert!(!may_open_plugin_page(Some("wisp-plugin://passwords/list.html"), page));
+        assert!(!may_open_plugin_page(Some("https://example.com/"), page));
+        assert!(!may_open_plugin_page(Some("wisp-plugin://vidgrab.evil/"), page));
     }
 
     #[test]
