@@ -621,7 +621,11 @@ class MainActivity : Activity(), Plugins.Ui {
         val tab = Tabs.current
         if (page != null) {
             val base = Engine.extensions[plugin]?.metaData?.baseUrl ?: return
-            openTab(base + page + (tab?.let { "?tab=${it.id}" } ?: ""), true)
+            // A tab of its own, at full size: without ?tab=, which tells a
+            // plugin's page it's in a small pop-up under a toolbar button
+            // (desktop Wisp's), the Passwords and Bookmarks pages laid out
+            // half as wide as the phone.
+            openTab(base + page, true)
             return
         }
         val data = JSONObject().put("id", action).put("url", tab?.url ?: JSONObject.NULL).put("title", tab?.title ?: JSONObject.NULL)
