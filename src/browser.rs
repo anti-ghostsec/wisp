@@ -2050,7 +2050,17 @@ impl BrowserWindow {
         let select = gtk::GestureClick::builder().button(1).build();
         let w = Rc::downgrade(self);
         let t = Rc::downgrade(&tab);
-        select.connect_pressed(move |_, _, _, _| {
+        // A press on the close button isn't a press to switch: switching
+        // first would take the click from it, so closing a tab you're not
+        // on would only switch to it.
+        let close_button = close.downgrade();
+        select.connect_pressed(move |g, _, x, y| {
+            let on_close = close_button.upgrade().is_some_and(|c| {
+                g.widget().and_then(|h| h.pick(x, y, gtk::PickFlags::DEFAULT)).is_some_and(|p| p == c || p.is_ancestor(&c))
+            });
+            if on_close {
+                return;
+            }
             if let (Some(win), Some(tab)) = (w.upgrade(), t.upgrade())
                 && let Some(n) = win.notebook.page_num(&tab.page) {
                     win.notebook.set_current_page(Some(n));
@@ -3505,6 +3515,24 @@ impl BrowserWindow {
                             c = ch.next_sibling();
                         }
                         Some(format!("items={n}"))
+                    }
+                    // tabs: the tabs, the current one marked; closebutton N: where
+                    // tab N's close button is in the window (x y).
+                    "tabs" => {
+                        let w = s.last_window()?;
+                        let current = w.current_tab();
+                        let list: Vec<String> = w.tabs.borrow().iter().map(|t| {
+                            let mark = if current.as_ref().is_some_and(|c| Rc::ptr_eq(c, t)) { "*" } else { "" };
+                            format!("{mark}{}", t.uri.borrow())
+                        }).collect();
+                        Some(list.join(" "))
+                    }
+                    "closebutton" => {
+                        let w = s.last_window()?;
+                        let tab = w.tabs.borrow().get(arg.parse::<usize>().ok()?)?.clone();
+                        let button = tab.header.last_child()?;
+                        let b = button.compute_bounds(&w.window)?;
+                        Some(format!("{} {}", (b.x() + b.width() / 2.0) as i32, (b.y() + b.height() / 2.0) as i32))
                     }
                     "rss" => std::fs::read_to_string("/proc/self/status").ok()?.lines().find(|l| l.starts_with("VmRSS")).map(str::to_string),
                     "views" => {

@@ -20,6 +20,8 @@
 //!   bookmarks N        add N test bookmarks
 //!   rss                Wisp's own memory in use
 //!   bar                how many items the bookmarks bar shows
+//!   tabs               the tabs (* marks the current one)
+//!   closebutton N      where tab N's close button is in the window
 //!   popup PLUGIN/ACTION  press a plugin's toolbar button; while its pop-up
 //!                      is open, commands go to it
 //!   sleep SECS
