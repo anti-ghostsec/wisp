@@ -1,8 +1,8 @@
 {
   "id": "adblock",
   "name": "Ad & Tracker Blocker",
-  "version": "2.0",
-  "description": "Blocks ads, trackers, pop-unders and redirects to known ad/scam sites using EasyList, EasyPrivacy and uBlock's badware list, compiled into WebKit's native content blocker. Lists refresh every 4 days.",
+  "version": "2.1",
+  "description": "Blocks ads, trackers, pop-unders and redirects to known ad/scam sites using EasyList, EasyPrivacy and uBlock's badware list, compiled into WebKit's native content blocker; and YouTube's video and page ads. Lists refresh every 4 days.",
   "blocklists": ["rules.json"],
   "filter_lists": [
     { "name": "EasyList", "url": "https://easylist.to/easylist/easylist.txt" },
@@ -10,6 +10,14 @@
     { "name": "uBlock Badware risks", "url": "https://ublockorigin.github.io/uAssets/filters/badware.txt" }
   ],
   "content_scripts": [
-    { "matches": ["https://duckduckgo.com/*"], "css": ["duckduckgo.css"], "run_at": "document_start" }
+    { "matches": ["https://duckduckgo.com/*"], "css": ["duckduckgo.css"], "run_at": "document_start" },
+    {
+      "matches": ["https://www.youtube.com/*", "https://m.youtube.com/*", "https://music.youtube.com/*", "https://www.youtube-nocookie.com/*"],
+      "js": ["youtube.js"],
+      "css": ["youtube.css"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "page"
+    }
   ]
 }

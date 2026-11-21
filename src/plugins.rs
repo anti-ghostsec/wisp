@@ -110,6 +110,9 @@ pub struct PluginHost {
     /// Content filters still being loaded or compiled, and what waits for
     /// them (the first window's pages: see `when_filters_ready`).
     filters_pending: Rc<FilterGate>,
+    /// Makes what pages read about the browser match the user agent
+    /// (useragent.rs), in the page's own world.
+    ua_script: RefCell<Option<String>>,
 }
 
 /// Counts content filters on their way in; runs what waits for them once
@@ -298,6 +301,7 @@ impl PluginHost {
             refused,
             pages: RefCell::default(),
             filters_pending: Rc::default(),
+            ua_script: RefCell::new(crate::useragent::page_script(cfg.user_agent.as_deref())),
         });
         for p in &host.plugins {
             host.register_handler(p);
@@ -384,6 +388,25 @@ impl PluginHost {
             &[],
             &[],
         ));
+        if let Some(js) = &*self.ua_script.borrow() {
+            self.ucm.add_script(&UserScript::new(
+                js,
+                UserContentInjectedFrames::AllFrames,
+                UserScriptInjectionTime::Start,
+                &[],
+                &[],
+            ));
+        }
+        if crate::perf::enabled() {
+            self.ucm.add_script(&UserScript::for_world(
+                crate::perf::PROBE,
+                UserContentInjectedFrames::TopFrame,
+                UserScriptInjectionTime::Start,
+                crate::perf::WORLD,
+                &[],
+                &[],
+            ));
+        }
         let enabled: Vec<_> = self.enabled().cloned().collect();
         for p in &enabled {
             self.install(p);
@@ -414,6 +437,12 @@ impl PluginHost {
             .filter(|p| cfg.plugins.get(&p.manifest.id).copied().unwrap_or(p.manifest.enabled_by_default))
             .cloned()
             .collect()
+    }
+
+    /// The user agent changed: its page script, from the next page on.
+    pub fn set_ua_script(self: &Rc<Self>, js: Option<String>) {
+        *self.ua_script.borrow_mut() = js;
+        self.apply();
     }
 
     /// The settings are released before the UI is rebuilt, which reads them.

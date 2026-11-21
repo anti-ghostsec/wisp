@@ -5,6 +5,7 @@ use crate::downloads::{self, Downloads};
 use crate::icons;
 use crate::plugins::{self, PluginHost, PluginUi};
 use crate::privacy;
+use crate::useragent;
 use crate::state::{SavedTab, Store};
 use crate::sync::{self, Account, Sync};
 use crate::tooltip::PageTip;
@@ -1638,9 +1639,10 @@ impl BrowserWindow {
             shared.config.borrow_mut().no_jit = on;
         });
         no_jit.set_tooltip_text(Some(
-            "Runs pages' scripts without the JIT compiler, which most browser exploits go through. Heavy sites and web apps get slower. Takes effect when Wisp is next started.",
+            "Runs pages' scripts without the JIT compiler, which most browser exploits go through. Ordinary pages load a little slower; web apps such as YouTube much slower, and they stutter. Takes effect when Wisp is next started.",
         ));
         vbox.append(&no_jit);
+        vbox.append(&self.user_agent_row());
         vbox.append(&gtk::Button::builder().label("History (Ctrl+H)").action_name("win.history").build());
         if share::available() {
             vbox.append(&gtk::Button::builder().label("Share page…").action_name("win.share-page").build());
@@ -1752,6 +1754,95 @@ impl BrowserWindow {
     /// The ☰ menu's plugins, in toolbar order: drag ⠿ to reorder, "Toolbar"
     /// shows or hides a plugin's buttons (hidden ones get them here instead),
     /// the switch turns the plugin on or off.
+    /// "Identify as": which browser sites are told Wisp is (useragent.rs).
+    /// Applies from the next page loaded.
+    fn user_agent_row(self: &Rc<Self>) -> gtk::Box {
+        let mut labels: Vec<&str> = useragent::PRESETS.iter().map(|p| p.label).collect();
+        labels.push("Custom…");
+        let choice = gtk::DropDown::from_strings(&labels);
+        let current = self.shared.config.borrow().user_agent.clone();
+        let index = match useragent::preset_of(current.as_deref()) {
+            Some(id) => useragent::PRESETS.iter().position(|p| p.id == id).unwrap_or(0),
+            None => useragent::PRESETS.len(),
+        };
+        choice.set_selected(index as u32);
+        let tip = |i: usize| match useragent::PRESETS.get(i) {
+            Some(p) => p.tooltip.to_string(),
+            None => "The user agent text you give.".to_string(),
+        };
+        choice.set_tooltip_text(Some(&tip(index)));
+        let w = Rc::downgrade(self);
+        choice.connect_selected_notify(move |c| {
+            let Some(win) = w.upgrade() else { return };
+            let i = c.selected() as usize;
+            c.set_tooltip_text(Some(&tip(i)));
+            match useragent::PRESETS.get(i) {
+                Some(p) => win.set_user_agent(Some(format!("preset:{}", p.id))),
+                None => win.ask_custom_user_agent(),
+            }
+        });
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        row.append(&gtk::Label::new(Some("Identify as")));
+        choice.set_hexpand(true);
+        row.append(&choice);
+        row
+    }
+
+    fn set_user_agent(&self, setting: Option<String>) {
+        let shared = &self.shared;
+        {
+            let mut cfg = shared.config.borrow_mut();
+            cfg.user_agent = setting.clone();
+            cfg.save();
+        }
+        let ua = useragent::resolve(setting.as_deref());
+        shared.settings.set_user_agent(ua.as_deref());
+        shared.plugins.set_ua_script(useragent::page_script(setting.as_deref()));
+    }
+
+    fn ask_custom_user_agent(self: &Rc<Self>) {
+        let current = self.shared.config.borrow().user_agent.clone().filter(|s| !s.starts_with("preset:"));
+        let entry = gtk::Entry::builder()
+            .text(current.unwrap_or_else(|| useragent::resolve(None).unwrap_or_default()))
+            .width_chars(60)
+            .build();
+        let dialog = gtk::Window::builder()
+            .title("Custom user agent")
+            .transient_for(&self.window)
+            .modal(true)
+            .resizable(false)
+            .build();
+        let save = gtk::Button::builder().label("Use").css_classes(["suggested-action"]).build();
+        let cancel = gtk::Button::with_label("Cancel");
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        buttons.set_halign(gtk::Align::End);
+        buttons.append(&cancel);
+        buttons.append(&save);
+        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        vbox.set_margin_top(12);
+        vbox.set_margin_bottom(12);
+        vbox.set_margin_start(12);
+        vbox.set_margin_end(12);
+        vbox.append(&gtk::Label::builder().label("What Wisp tells sites it is, from the next page on:").xalign(0.0).build());
+        vbox.append(&entry);
+        vbox.append(&buttons);
+        dialog.set_child(Some(&vbox));
+        let d = dialog.clone();
+        cancel.connect_clicked(move |_| d.close());
+        let (d, w, e) = (dialog.clone(), Rc::downgrade(self), entry.clone());
+        let use_it = move || {
+            let text = e.text().trim().to_string();
+            if let Some(win) = w.upgrade() {
+                win.set_user_agent((!text.is_empty()).then_some(text).or(Some("preset:webkit".into())));
+            }
+            d.close();
+        };
+        let u = use_it.clone();
+        save.connect_clicked(move |_| u());
+        entry.connect_activate(move |_| use_it());
+        dialog.present();
+    }
+
     fn fill_plugin_list(self: &Rc<Self>, list: &gtk::Box) {
         while let Some(child) = list.first_child() {
             list.remove(&child);
@@ -2083,6 +2174,7 @@ impl BrowserWindow {
             if std::env::var_os("WISP_DEBUG").is_some() {
                 eprintln!("wisp: load {event:?} {}", v.uri().unwrap_or_default());
             }
+            crate::perf::load_event(event);
             match event {
                 // load-changed fires for the main frame only, which is exactly
                 // where HTTPS upgrades and tracking-param stripping belong.
@@ -3260,6 +3352,28 @@ impl BrowserWindow {
                 .build()
                 .show(Some(&self.window));
         }
+    }
+
+    /// A timing run (perf.rs).
+    pub fn run_perf(self: &Rc<Self>, file: String) {
+        let (a, b, c) = (Rc::downgrade(self), Rc::downgrade(self), Rc::downgrade(self));
+        crate::perf::run(
+            file,
+            move || a.upgrade().and_then(|w| w.current_view()),
+            move |url, new| {
+                let Some(w) = b.upgrade() else { return };
+                if new {
+                    w.new_tab(Some(url), None, true);
+                } else if let Some(tab) = w.current_tab() {
+                    w.navigate(&tab, url);
+                }
+            },
+            move || {
+                if let Some(w) = c.upgrade() {
+                    w.shared.app.quit();
+                }
+            },
+        );
     }
 
     pub fn screenshot_and_quit(self: &Rc<Self>, path: String, delay: Duration) {

@@ -39,7 +39,10 @@ Wisp for Android, on GeckoView with the same Rust core (`core/`), is in
 - **Ad & tracker blocking** (the `adblock` plugin): EasyList, EasyPrivacy and
   uBlock's badware list, about 110k rules, compiled into WebKit's native
   content blocker. Navigating or redirecting to a listed ad or scam domain is
-  blocked too.
+  blocked too. YouTube's video ads (before and during videos) and its page ads are
+  removed too: the ad entries are taken out of the video's data before the
+  player sees them, as uBlock Origin does, and an ad that still gets
+  through is skipped.
 - **Pop-up guard**: a script pop-up to another site (the usual click-hijack or
   pop-under trick) is held behind a bar with **Open** / **Allow on this
   site** (until Wisp closes). Normal `target=_blank` links open as tabs.
@@ -59,8 +62,9 @@ Wisp for Android, on GeckoView with the same Rust core (`core/`), is in
   opened.
 - **Safer JavaScript** (☰ → *Safer JavaScript (slower)*, `no_jit`, off by
   default): scripts run in JavaScriptCore's interpreter only, without the
-  JIT compiler that most browser exploits go through. Heavy sites and web
-  apps get slower. It takes effect when Wisp next starts, and a `JSC_useJIT`
+  JIT compiler that most browser exploits go through. Ordinary pages load
+  10–20% slower, but web apps far more: YouTube keeps the page busy about
+  a third of the time, so it stutters and is slow to answer clicks. It takes effect when Wisp next starts, and a `JSC_useJIT`
   you set yourself takes precedence.
 - **Site databases** (IndexedDB), which many sites and web apps need, are
   allowed: in the private session they stay in memory and are gone when Wisp
@@ -86,6 +90,14 @@ Wisp for Android, on GeckoView with the same Rust core (`core/`), is in
   and adds faint per-page-load noise to canvas and WebGL readbacks. It is
   partial: fonts, audio, the time zone, screen size and the user agent are
   not covered, and a careful site can tell it is running.
+- **Identify as** (☰, `user_agent`): which browser sites are told Wisp is.
+  *Safari on a Mac* is the default: Wisp's engine is Safari's, so sites send
+  code made for it, and it's a common browser. *Chrome on Windows* is the
+  most common one, but some sites then send Chrome-only code that WebKit
+  runs badly, and a site that looks past the user agent can tell. *WebKit's
+  own* says Linux and "Safari 60.5": rare, so easy to pick out, and YouTube
+  sends it the slower code it keeps for old browsers. *Custom…* takes any
+  text. With a preset, `navigator.platform` and `navigator.vendor` match it.
 - **Search**: the default engine is DuckDuckGo with its ads turned off
   (`k1=-1`); its upgrade pop-over and feedback button are hidden. Type
   `ai` and a question in the address bar to ask Duck.ai instead.

@@ -1,0 +1,18 @@
+/* YouTube's page ads: in the feed, in search results, beside and under the
+   video, over the video, and the masthead. */
+ytd-ad-slot-renderer, ytd-in-feed-ad-layout-renderer, ytd-banner-promo-renderer,
+ytd-statement-banner-renderer, ytd-promoted-sparkles-web-renderer, ytd-promoted-sparkles-text-search-renderer,
+ytd-promoted-video-renderer, ytd-compact-promoted-video-renderer, ytd-display-ad-renderer,
+ytd-action-companion-ad-renderer, ytd-player-legacy-desktop-watch-ads-renderer, ytd-search-pyv-renderer,
+ytd-ads-engagement-panel-content-renderer, ytd-merch-shelf-renderer, ytd-brand-video-singleton-renderer,
+ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-ads"],
+ytd-rich-item-renderer:has(> #content > ytd-ad-slot-renderer),
+ytd-rich-section-renderer:has(ytd-statement-banner-renderer),
+#masthead-ad, #player-ads, #panels > ytd-ads-engagement-panel-content-renderer,
+.ytp-ad-overlay-container, .ytp-ad-overlay-slot, .ytp-ad-image-overlay, .ytp-featured-product,
+.ytp-suggested-action-badge, .ytd-player-legacy-desktop-watch-ads-renderer,
+panel-ad-header-image-lockup-view-model, ad-slot-renderer, ytm-promoted-sparkles-web-renderer,
+ytm-companion-ad-renderer, ytm-promoted-video-renderer, ytmusic-mealbar-promo-renderer,
+ytd-enforcement-message-view-model, tp-yt-paper-dialog:has(ytd-enforcement-message-view-model) {
+  display: none !important;
+}

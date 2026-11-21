@@ -16,6 +16,8 @@ mod bigcopy;
 mod runtime;
 mod share;
 mod signing;
+mod perf;
+mod useragent;
 
 use browser::{BrowserWindow, Shared};
 use gtk::prelude::*;
@@ -155,6 +157,9 @@ fn open_window(shared: &Rc<Shared>, uris: Vec<String>, starting: bool) {
     if let Ok(path) = std::env::var("WISP_SCREENSHOT") {
         let secs = std::env::var("WISP_SCREENSHOT_DELAY").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
         window.screenshot_and_quit(path, std::time::Duration::from_secs(secs));
+    }
+    if let Ok(file) = std::env::var("WISP_PERF_SCRIPT") {
+        window.run_perf(file);
     }
     // For testing pop-ups: WISP_OPEN_ACTION=plugin/action presses that button.
     if let Some((plugin, action)) = std::env::var("WISP_OPEN_ACTION").ok().and_then(|a| a.split_once('/').map(|(p, a)| (p.to_string(), a.to_string()))) {

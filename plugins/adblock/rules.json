@@ -991,5 +991,45 @@
   "action": {
    "type": "block"
   }
+ },
+ {
+  "trigger": {
+   "url-filter": "^https?://([^/]+\\.)?youtube\\.com/pagead/"
+  },
+  "action": {
+   "type": "block"
+  }
+ },
+ {
+  "trigger": {
+   "url-filter": "^https?://([^/]+\\.)?youtube\\.com/api/stats/ads"
+  },
+  "action": {
+   "type": "block"
+  }
+ },
+ {
+  "trigger": {
+   "url-filter": "^https?://([^/]+\\.)?youtube\\.com/get_midroll_"
+  },
+  "action": {
+   "type": "block"
+  }
+ },
+ {
+  "trigger": {
+   "url-filter": "^https?://([^/]+\\.)?youtube\\.com/ptracking"
+  },
+  "action": {
+   "type": "block"
+  }
+ },
+ {
+  "trigger": {
+   "url-filter": "^https?://([^/]+\\.)?youtube\\.com/pcs/activeview"
+  },
+  "action": {
+   "type": "block"
+  }
  }
 ]

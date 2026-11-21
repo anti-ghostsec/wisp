@@ -105,8 +105,8 @@ pub fn settings(cfg: &Config) -> Settings {
         }
     }
     // Web Audio stays on: games, calls and some players need it.
-    if let Some(ua) = &cfg.user_agent {
-        s.set_user_agent(Some(ua));
+    if let Some(ua) = crate::useragent::resolve(cfg.user_agent.as_deref()) {
+        s.set_user_agent(Some(&ua));
     }
     s
 }
