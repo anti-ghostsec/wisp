@@ -11,6 +11,10 @@
 //!   js JS              print the page's JS expression
 //!   fps SECS           scroll the page down for SECS, frame by frame;
 //!                      prints frames per second and the longest frame
+//!   window URL         open URL in a new window (later commands use it)
+//!   closewin [first]   close the newest (or the first) window
+//!   closetab           close the current tab
+//!   views              how many pages are still alive, and playing sound
 //!   sleep SECS
 //!   quit
 //!
@@ -92,6 +96,7 @@ pub fn run(
     view: impl Fn() -> Option<WebView> + 'static,
     go: impl Fn(&str, bool) + 'static,
     quit: impl Fn() + 'static,
+    other: impl Fn(&str, &str) -> Option<String> + 'static,
 ) {
     // Wisp's window thread: tasks over 50 ms.
     glib::timeout_add_local(Duration::from_millis(16), || {
@@ -189,7 +194,10 @@ pub fn run(
                 "js" => println!("perf: js {} :: {arg}", eval(&v, arg, None).await),
                 "sleep" => glib::timeout_future(Duration::from_secs_f64(arg.parse().unwrap_or(1.0))).await,
                 "quit" => break,
-                _ => eprintln!("perf: unknown command {cmd}"),
+                _ => match other(cmd, arg) {
+                    Some(out) => println!("perf: {cmd} {out}"),
+                    None => eprintln!("perf: unknown command {cmd}"),
+                },
             }
         }
         quit();

@@ -1116,6 +1116,12 @@ impl BrowserWindow {
             if let Some(win) = w.upgrade() {
                 win.shared.windows.borrow_mut().retain(|x| !Rc::ptr_eq(x, &win));
                 win.shared.save_session_soon();
+                let tabs = std::mem::take(&mut *win.tabs.borrow_mut());
+                for tab in tabs {
+                    if let Some(view) = tab.view.borrow_mut().take() {
+                        retire_view(&view);
+                    }
+                }
             }
             glib::Propagation::Proceed
         });
@@ -2569,7 +2575,10 @@ impl BrowserWindow {
         self.shared.save_session_soon();
         self.shared.plugins.tab_event("tab-closed", &serde_json::json!({ "tabId": tab.id }));
         self.tabs.borrow_mut().retain(|t| !Rc::ptr_eq(t, tab));
-        tab.view.borrow_mut().take();
+        let view = tab.view.borrow_mut().take();
+        if let Some(view) = view {
+            retire_view(&view);
+        }
         if self.tabs.borrow().is_empty() {
             self.window.close();
             return;
@@ -3378,14 +3387,15 @@ impl BrowserWindow {
         }
     }
 
-    /// A timing run (perf.rs).
+    /// A timing run (perf.rs). Its commands go to the newest window.
     pub fn run_perf(self: &Rc<Self>, file: String) {
-        let (a, b, c) = (Rc::downgrade(self), Rc::downgrade(self), Rc::downgrade(self));
+        let s = Rc::downgrade(&self.shared);
+        let (a, b, c, d) = (s.clone(), s.clone(), s.clone(), s);
         crate::perf::run(
             file,
-            move || a.upgrade().and_then(|w| w.current_view()),
+            move || a.upgrade().and_then(|s| s.windows.borrow().iter().rev().find_map(|w| w.current_view())),
             move |url, new| {
-                let Some(w) = b.upgrade() else { return };
+                let Some(w) = b.upgrade().and_then(|s| s.last_window()) else { return };
                 if new {
                     w.new_tab(Some(url), None, true);
                 } else if let Some(tab) = w.current_tab() {
@@ -3393,16 +3403,44 @@ impl BrowserWindow {
                 }
             },
             move || {
-                if let Some(w) = c.upgrade() {
-                    w.shared.app.quit();
+                if let Some(s) = c.upgrade() {
+                    s.app.quit();
+                }
+            },
+            move |cmd, arg| {
+                let s = d.upgrade()?;
+                match cmd {
+                    "window" => {
+                        BrowserWindow::new(&s, &[arg.to_string()]);
+                        Some(arg.to_string())
+                    }
+                    "closewin" => {
+                        let w = if arg == "first" { s.windows.borrow().first().cloned() } else { s.last_window() };
+                        w?.window.close();
+                        Some(format!("windows={}", s.windows.borrow().len()))
+                    }
+                    "closetab" => {
+                        let w = s.last_window()?;
+                        let tab = w.current_tab()?;
+                        w.close_tab(&tab);
+                        Some(format!("tabs={}", w.tabs.borrow().len()))
+                    }
+                    "views" => {
+                        let views: Vec<WebView> = s.views.borrow().iter().filter_map(|v| v.upgrade()).collect();
+                        let playing = views.iter().filter(|v| v.is_playing_audio()).count();
+                        let uris: Vec<String> = views.iter().map(|v| v.uri().map(|u| u.to_string()).unwrap_or_default()).collect();
+                        Some(format!("alive={} playing={playing} windows={} uris={uris:?}", views.len(), s.windows.borrow().len()))
+                    }
+                    _ => None,
                 }
             },
         );
     }
 
     pub fn screenshot_and_quit(self: &Rc<Self>, path: String, delay: Duration) {
-        let win = self.clone();
+        let w = Rc::downgrade(self);
         glib::timeout_add_local_once(delay, move || {
+            let Some(win) = w.upgrade() else { return };
             if let Some(title) = win.current_view().and_then(|v| v.title()) {
                 println!("wisp: screenshot of page \"{title}\"");
             }
@@ -3620,6 +3658,15 @@ use wisp_core::address::{is_app_link, site_of};
 /// would otherwise be silently ignored).
 /// Whether a page at `from` may open or load the plugin page `target`:
 /// only Wisp's own pages (none yet, blank, wisp:) and the same plugin's.
+/// A closed tab's page, stopped now: its sound, video and scripts end, and
+/// its memory goes, even while something (GTK, an input method) still holds
+/// the view and keeps it from being freed with its window.
+fn retire_view(view: &WebView) {
+    view.set_is_muted(true);
+    view.stop_loading();
+    view.load_uri("about:blank");
+}
+
 fn may_open_plugin_page(from: Option<&str>, target: &str) -> bool {
     let plugin = |u: &str| {
         u.strip_prefix(plugins::PAGE_SCHEME)
