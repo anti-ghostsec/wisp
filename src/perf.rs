@@ -15,6 +15,13 @@
 //!   closewin [first]   close the newest (or the first) window
 //!   closetab           close the current tab
 //!   views              how many pages are still alive, and playing sound
+//!   vault PASSWORD     set up (or unlock) a test vault with that password
+//!   sync URL           set up a sync account on that (test) service
+//!   bookmarks N        add N test bookmarks
+//!   rss                Wisp's own memory in use
+//!   bar                how many items the bookmarks bar shows
+//!   popup PLUGIN/ACTION  press a plugin's toolbar button; while its pop-up
+//!                      is open, commands go to it
 //!   sleep SECS
 //!   quit
 //!

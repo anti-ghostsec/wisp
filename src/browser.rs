@@ -61,6 +61,8 @@ pub struct Shared {
     media_loop: Cell<Option<bool>>,
     /// A drag is in progress somewhere in Wisp.
     drag_active: Cell<bool>,
+    /// The bookmarks bars are to be rebuilt (sync data changed).
+    bar_queued: Cell<bool>,
     /// What a drop decided, run once the drag has fully ended (see `after_drag`).
     after_drag: RefCell<Vec<Box<dyn FnOnce()>>>,
     /// Owns every open window; widget callbacks only hold weak references.
@@ -204,6 +206,7 @@ impl Shared {
             session_save_queued: Cell::new(false),
             media_loop: Cell::new(None),
             drag_active: Cell::new(false),
+            bar_queued: Cell::new(false),
             after_drag: RefCell::new(Vec::new()),
             windows: RefCell::new(Vec::new()),
         });
@@ -220,9 +223,14 @@ impl Shared {
         let weak = Rc::downgrade(&shared);
         shared.sync.connect_changed(move || {
             let Some(shared) = weak.upgrade() else { return };
+            // Once for changes that come together (an import, a sync).
+            if shared.bar_queued.replace(true) {
+                return;
+            }
             let again = Rc::downgrade(&shared);
             shared.after_drag(move || {
                 if let Some(shared) = again.upgrade() {
+                    shared.bar_queued.set(false);
                     for win in shared.windows.borrow().iter() {
                         win.rebuild_bookmarks_bar();
                     }
@@ -272,8 +280,10 @@ impl Shared {
         vertical: bool,
         on_drop: impl Fn(gtk::Widget, bool) + 'static,
     ) {
-        let zone = DropZone { container: container.clone().upcast(), vertical, area: None };
-        self.reorderable_zones(handle, item, move |_| vec![zone.clone()], on_drop);
+        // Weak: the container holds the handle, which holds this.
+        let container = container.clone().upcast::<gtk::Widget>().downgrade();
+        let zones = move |_: &gtk::graphene::Point| container.upgrade().map(|container| DropZone { container, vertical, area: None }).into_iter().collect();
+        self.reorderable_zones(handle, item, zones, on_drop);
     }
 
     /// Like `reorderable`, across several containers, which may sit in
@@ -293,8 +303,11 @@ impl Shared {
         let state = Rc::new(RefCell::new((false, None::<(gtk::Widget, bool)>)));
         let gesture = gtk::GestureDrag::builder().button(1).build();
 
-        let (st, me, it, h) = (state.clone(), Rc::downgrade(self), item.clone(), handle.clone());
+        // Weak: `handle` holds the gesture, and with it these handlers; a
+        // strong reference would keep every bookmark ever shown alive.
+        let (st, me, it, h) = (state.clone(), Rc::downgrade(self), item.downgrade(), handle.downgrade());
         gesture.connect_drag_update(move |g, dx, dy| {
+            let (Some(it), Some(h)) = (it.upgrade(), h.upgrade()) else { return };
             let mut s = st.borrow_mut();
             if !s.0 {
                 if dx.hypot(dy) < 8.0 {
@@ -361,7 +374,7 @@ impl Shared {
         });
 
         let on_drop = Rc::new(on_drop);
-        let (st, me, it) = (state, Rc::downgrade(self), item);
+        let (st, me, it) = (state, Rc::downgrade(self), item.downgrade());
         gesture.connect_drag_end(move |_, _, _| {
             let target = {
                 let mut s = st.borrow_mut();
@@ -371,7 +384,9 @@ impl Shared {
                 s.0 = false;
                 s.1.take()
             };
-            it.remove_css_class("wisp-dragging");
+            if let Some(it) = it.upgrade() {
+                it.remove_css_class("wisp-dragging");
+            }
             if let Some((t, _)) = &target {
                 clear(t);
             }
@@ -879,6 +894,8 @@ pub struct BrowserWindow {
     bookmarks_overflow: gtk::MenuButton,
     /// (widget, id, name, url) of each bookmark on the bar, for the » menu.
     bookmark_items: RefCell<Vec<(gtk::Widget, i64, String, String)>>,
+    /// (id, name, url) of the bookmarks the bar was last built with.
+    bar_shows: RefCell<Option<Vec<(i64, String, String)>>>,
     popup_bar: gtk::Revealer,
     popup_label: gtk::Label,
     /// (url, opener site) of the last blocked pop-up.
@@ -1096,6 +1113,7 @@ impl BrowserWindow {
             bookmarks_scroll,
             bookmarks_overflow: overflow.clone(),
             bookmark_items: RefCell::new(Vec::new()),
+            bar_shows: RefCell::new(None),
             popup_bar,
             popup_label,
             blocked_popup: RefCell::new(None),
@@ -2935,6 +2953,17 @@ impl BrowserWindow {
     /// this tab, middle-click in a new one, drag to reorder (also to and from
     /// the » menu), right-click for more.
     fn rebuild_bookmarks_bar(self: &Rc<Self>) {
+        let marks = self.shared.sync.cached("b_");
+        // Most changes aren't to the bar's bookmarks (a saved password, a
+        // bookmark in another folder): the bar stays as it is.
+        let shown: Vec<(i64, String, String)> = marks
+            .iter()
+            .map(|b| (b["id"].as_i64().unwrap_or(0), b["name"].as_str().unwrap_or("").to_string(), b["url"].as_str().unwrap_or("").to_string()))
+            .collect();
+        if self.bar_shows.borrow().as_ref() == Some(&shown) {
+            return;
+        }
+        *self.bar_shows.borrow_mut() = Some(shown);
         while let Some(child) = self.bookmarks_bar.first_child() {
             self.bookmarks_bar.remove(&child);
         }
@@ -2943,7 +2972,6 @@ impl BrowserWindow {
             p.popdown();
         }
         self.bookmark_items.borrow_mut().clear();
-        let marks = self.shared.sync.cached("b_");
         if marks.is_empty() {
             let hint = gtk::Label::builder().label("Bookmarks you add (Ctrl+D) show up here").css_classes(["dim-label"]).margin_start(8).build();
             self.bookmarks_bar.append(&hint);
@@ -2978,12 +3006,13 @@ impl BrowserWindow {
         item.append(&label);
 
         let click = gtk::GestureClick::builder().button(0).build();
-        let (w, u, p) = (Rc::downgrade(self), url.to_string(), popover.cloned());
+        // Weak: the item (in the popover) holds this handler.
+        let (w, u, p) = (Rc::downgrade(self), url.to_string(), popover.map(|p| p.downgrade()));
         click.connect_released(move |g, _, _, _| {
             let Some(win) = w.upgrade() else { return };
             match g.current_button() {
                 1 => {
-                    if let Some(p) = &p {
+                    if let Some(p) = p.as_ref().and_then(|p| p.upgrade()) {
                         p.popdown();
                     }
                     if let Some(tab) = win.current_tab() {
@@ -3002,9 +3031,9 @@ impl BrowserWindow {
         item.set_widget_name(&format!("bookmark:{id}"));
 
         let menu = gtk::GestureClick::builder().button(3).build();
-        let (w, it, url) = (Rc::downgrade(self), item.clone(), url.to_string());
+        let (w, it, url) = (Rc::downgrade(self), item.downgrade(), url.to_string());
         menu.connect_pressed(move |_, _, _, _| {
-            if let Some(win) = w.upgrade() {
+            if let (Some(win), Some(it)) = (w.upgrade(), it.upgrade()) {
                 win.bookmark_menu(&it, id, &url);
             }
         });
@@ -3393,7 +3422,12 @@ impl BrowserWindow {
         let (a, b, c, d) = (s.clone(), s.clone(), s.clone(), s);
         crate::perf::run(
             file,
-            move || a.upgrade().and_then(|s| s.windows.borrow().iter().rev().find_map(|w| w.current_view())),
+            // An open plugin pop-up, else the newest window's tab.
+            move || {
+                let s = a.upgrade()?;
+                let popup = s.views.borrow().iter().filter_map(|v| v.upgrade()).find(|v| v.is_mapped() && v.uri().is_some_and(|u| u.contains("?tab=")));
+                popup.or_else(|| s.windows.borrow().iter().rev().find_map(|w| w.current_view()))
+            },
             move |url, new| {
                 let Some(w) = b.upgrade().and_then(|s| s.last_window()) else { return };
                 if new {
@@ -3425,6 +3459,54 @@ impl BrowserWindow {
                         w.close_tab(&tab);
                         Some(format!("tabs={}", w.tabs.borrow().len()))
                     }
+                    "popup" => {
+                        let (plugin, action) = arg.split_once('/')?;
+                        s.last_window()?.run_plugin_action(plugin, action);
+                        Some(arg.to_string())
+                    }
+                    // vault PASSWORD: set up a test vault with it, or unlock it.
+                    "vault" => {
+                        let (pw, v) = (arg.to_string(), crate::vault::get());
+                        glib::spawn_future_local(async move {
+                            let r = if v.exists() { v.unlock(&pw).await } else { v.create(Some(pw)).await };
+                            println!("perf: vault {r:?}");
+                        });
+                        Some("started".into())
+                    }
+                    // sync URL: set up a sync account on that (test) service.
+                    "sync" => {
+                        let (url, sync) = (arg.to_string(), s.sync.clone());
+                        glib::spawn_future_local(async move {
+                            let r = sync.create_account(&url).await.map(|_| ());
+                            println!("perf: sync {r:?}");
+                        });
+                        Some("started".into())
+                    }
+                    // bookmarks N: add N test bookmarks.
+                    "bookmarks" => {
+                        let (n, sync) = (arg.parse::<u32>().unwrap_or(10), s.sync.clone());
+                        glib::spawn_future_local(async move {
+                            for i in 0..n {
+                                let entry = serde_json::json!({ "title": format!("b_Test bookmark {i}"), "url": format!("https://example.com/{i}") });
+                                if let Err(e) = sync.add(entry).await {
+                                    println!("perf: bookmarks {e}");
+                                    return;
+                                }
+                            }
+                            println!("perf: bookmarks added {n}");
+                        });
+                        Some("started".into())
+                    }
+                    "bar" => {
+                        let w = s.last_window()?;
+                        let (mut n, mut c) = (0, w.bookmarks_bar.first_child());
+                        while let Some(ch) = c {
+                            n += 1;
+                            c = ch.next_sibling();
+                        }
+                        Some(format!("items={n}"))
+                    }
+                    "rss" => std::fs::read_to_string("/proc/self/status").ok()?.lines().find(|l| l.starts_with("VmRSS")).map(str::to_string),
                     "views" => {
                         let views: Vec<WebView> = s.views.borrow().iter().filter_map(|v| v.upgrade()).collect();
                         let playing = views.iter().filter(|v| v.is_playing_audio()).count();
