@@ -16,7 +16,7 @@ async function renderStatus() {
       s.ytdlp ? `yt-dlp ${s.ytdlp} (${s.ytdlpPath})` : "yt-dlp NOT FOUND",
       s.ffmpeg ? `ffmpeg: ${s.ffmpeg}` : "ffmpeg NOT FOUND (needed for HD merging and MP3)",
       s.jsRuntime ? `JS runtime: ${s.jsRuntime}` : "JS runtime NOT FOUND (YouTube needs deno or node: sudo apt install nodejs)",
-      "Cookies: Wisp passes the site's cookies with each download (see “Use my login” below)",
+      "Cookies: none unless “Use my login” below is on",
       `Default folder: ${s.defaultDir}`,
     ].join("\n");
     out.style.whiteSpace = "pre-line";

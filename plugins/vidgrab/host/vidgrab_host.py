@@ -8,18 +8,21 @@ UTF-8 JSON).
 """
 
 import hashlib
+import http.client
 import ipaddress
 import json
 import os
 import re
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import urllib.request
 
 HOST_VERSION = "1.0.0"
@@ -50,13 +53,17 @@ PRESETS = {
 # Linux allows 255 bytes per file name, and yt-dlp appends suffixes such as
 # ".f137.mp4.part", so cap both the title and the ID (which on generic pages
 # can be a long chunk of the URL).
-DEFAULT_TEMPLATE = "%(title).150B [%(id).30B].%(ext)s"
-OLD_DEFAULT_TEMPLATE = "%(title).200B [%(id)s].%(ext)s"
+# No video ID in the name: it ties the file to the video it came from.
+DEFAULT_TEMPLATE = "%(title).150B.%(ext)s"
+OLD_DEFAULT_TEMPLATES = ("%(title).200B [%(id)s].%(ext)s", "%(title).150B [%(id).30B].%(ext)s")
+# When a file of that name is already there: the time it was fetched, never the ID.
+SECOND_TEMPLATE = "%(title).130B %(epoch)s.%(ext)s"
 SHORT_TEMPLATE = "%(title).60B.%(ext)s"
 
 write_lock = threading.Lock()
 jobs = {}  # job id -> subprocess.Popen
 jobs_lock = threading.Lock()
+already_saved = set()  # jobs whose file name was taken by an earlier download
 
 
 def send(msg):
@@ -138,16 +145,165 @@ def https_url(url):
     return url if local else "https://" + url[len("http://"):]
 
 
-def env_with_paths():
+PROXY_VARS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy", "ftp_proxy")
+
+
+def env_with_paths(route=None):
     env = os.environ.copy()
     env["PATH"] = os.pathsep.join(EXTRA_PATHS + [env.get("PATH", "")])
     env["PYTHONUNBUFFERED"] = "1"
+    if route is not None:
+        # Only the browser's route, never one left in the environment.
+        for name in list(env):
+            if name.lower() in PROXY_VARS:
+                del env[name]
+        if route not in ("direct", BLOCKED):
+            for name in ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+                env[name] = route
     return env
 
 
-def run_capture(cmd, timeout=60):
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env_with_paths())
+def run_capture(cmd, timeout=60, route=None):
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env_with_paths(route))
     return p.returncode, p.stdout.strip(), p.stderr.strip()
+
+
+# ---------- the browser's route ----------
+#
+# Wisp says with each message how its pages reach that address: "direct", a
+# proxy ("socks5h://127.0.0.1:9050", "http://127.0.0.1:7890"), or "blocked"
+# when it can't tell (its proxy or Tor went away): then nothing goes out at
+# all, rather than straight from this computer's own address. Everything
+# this helper fetches (yt-dlp, subtitles, yt-dlp's own updates) takes that
+# route. Without one (another browser's add-on), the environment's settings
+# apply as before.
+
+BLOCKED = "blocked"
+ROUTE_RE = re.compile(r"(https?|socks4a|socks5h)://(?:[^\s/@:]+(?::[^\s/@]*)?@)?(\[[0-9a-fA-F:.]+\]|[A-Za-z0-9.-]+):\d{1,5}/?")
+
+
+class RouteError(Exception):
+    pass
+
+
+ROUTE_GONE = ("Wisp can't tell how its pages reach the internet right now (its proxy or Tor isn't there), "
+              "so VidGrab isn't going online: it would go straight from your own address.")
+
+
+def route_of(msg):
+    """The route `msg` gives: None if it names none, BLOCKED if it isn't one
+    this helper can use exactly as the browser does."""
+    if "route" not in msg:
+        return None
+    route = msg.get("route")
+    if route == "direct":
+        return route
+    if isinstance(route, str) and ROUTE_RE.fullmatch(route):
+        return route.rstrip("/")
+    return BLOCKED
+
+
+def check_route(route):
+    if route == BLOCKED:
+        raise RouteError(ROUTE_GONE)
+
+
+def ytdlp_proxy_args(route):
+    """yt-dlp's --proxy for `route` ("" means none, overriding the environment)."""
+    if route is None:
+        return []
+    check_route(route)
+    return ["--proxy", "" if route == "direct" else route]
+
+
+def recv_exact(sock, n):
+    data = b""
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            raise OSError("the proxy closed the connection")
+        data += chunk
+    return data
+
+
+def socks_connect(proxy, host, port, timeout):
+    """A socket to host:port through the SOCKS proxy `proxy`, which looks
+    the name up itself (so it's never asked of this computer's DNS)."""
+    u = urllib.parse.urlsplit(proxy)
+    sock = socket.create_connection((u.hostname, u.port), timeout)
+    try:
+        name = host.encode("idna")
+        if u.scheme == "socks5h":
+            user, password = urllib.parse.unquote(u.username or ""), urllib.parse.unquote(u.password or "")
+            sock.sendall(b"\x05\x02\x00\x02" if u.username is not None else b"\x05\x01\x00")
+            ver, method = recv_exact(sock, 2)
+            if ver != 5 or method not in (0, 2) or (method == 2 and u.username is None):
+                raise OSError("the SOCKS proxy refused VidGrab")
+            if method == 2:
+                u8, p8 = user.encode()[:255], password.encode()[:255]
+                sock.sendall(b"\x01" + bytes([len(u8)]) + u8 + bytes([len(p8)]) + p8)
+                if recv_exact(sock, 2)[1] != 0:
+                    raise OSError("the SOCKS proxy refused the user name")
+            sock.sendall(b"\x05\x01\x00\x03" + bytes([len(name)]) + name + port.to_bytes(2, "big"))
+            reply = recv_exact(sock, 4)
+            if reply[1] != 0:
+                raise OSError(f"the SOCKS proxy couldn't reach {host} (error {reply[1]})")
+            size = {1: 4, 4: 16}.get(reply[3])
+            if size is None:
+                size = recv_exact(sock, 1)[0]
+            recv_exact(sock, size + 2)
+        else:  # socks4a
+            sock.sendall(b"\x04\x01" + port.to_bytes(2, "big") + b"\x00\x00\x00\x01"
+                         + urllib.parse.unquote(u.username or "").encode() + b"\x00" + name + b"\x00")
+            if recv_exact(sock, 8)[1] != 0x5A:
+                raise OSError(f"the SOCKS proxy couldn't reach {host}")
+        return sock
+    except BaseException:
+        sock.close()
+        raise
+
+
+class SocksHandler(urllib.request.HTTPSHandler):
+    """http:// and https:// through a SOCKS proxy."""
+
+    def __init__(self, proxy):
+        super().__init__()
+        self.proxy = proxy
+
+    def http_open(self, req):
+        proxy = self.proxy
+
+        class Conn(http.client.HTTPConnection):
+            def connect(self):
+                self.sock = socks_connect(proxy, self.host, self.port, self.timeout)
+
+        return self.do_open(Conn, req)
+
+    def https_open(self, req):
+        proxy = self.proxy
+
+        class Conn(http.client.HTTPSConnection):
+            def connect(self):
+                sock = socks_connect(proxy, self.host, self.port, self.timeout)
+                self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+        return self.do_open(Conn, req, context=self._context)
+
+
+def opener_for(route):
+    """A urllib opener that goes out by `route` only."""
+    if route is None:
+        return urllib.request.build_opener()
+    check_route(route)
+    if route == "direct":
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    if route.startswith("http"):
+        return urllib.request.build_opener(urllib.request.ProxyHandler({"http": route, "https": route}))
+    opener = urllib.request.OpenerDirector()
+    for handler in (SocksHandler(route), urllib.request.HTTPRedirectHandler(),
+                    urllib.request.HTTPDefaultErrorHandler(), urllib.request.HTTPErrorProcessor()):
+        opener.add_handler(handler)
+    return opener
 
 
 # yt-dlp fetched by VidGrab itself, and when it last checked for a newer one.
@@ -265,9 +421,9 @@ def listed_sha256(sums, name):
     raise ValueError(f"{name} isn't in the list of hashes")
 
 
-def fetch(url, limit):
+def fetch(url, limit, route=None):
     """What's at `url`, if it's at most `limit` bytes."""
-    with urllib.request.urlopen(url, timeout=120) as r:
+    with opener_for(route).open(url, timeout=120) as r:
         data = r.read(limit + 1)
     if len(data) > limit:
         raise ValueError(f"{url} is larger than expected")
@@ -294,14 +450,15 @@ def file_sha256(path):
 
 
 def handle_status(msg):
+    route = route_of(msg)
     ytdlp = find_ytdlp(msg.get("ytdlpPath"))
     if not ytdlp and msg.get("autoInstall"):
         # First use: fetch yt-dlp in the background, then report again.
         send({"type": "status", "hostVersion": HOST_VERSION, "installing": True})
         threading.Thread(target=install_then_status, args=(msg,), daemon=True).start()
         return
-    if ytdlp == [OWN_YTDLP]:
-        threading.Thread(target=update_if_due, daemon=True).start()
+    if ytdlp == [OWN_YTDLP] and route != BLOCKED:
+        threading.Thread(target=update_if_due, args=(route,), daemon=True).start()
     info = {
         "type": "status",
         "hostVersion": HOST_VERSION,
@@ -323,6 +480,10 @@ def handle_status(msg):
 
 
 def handle_update(msg):
+    route = route_of(msg)
+    if route == BLOCKED:
+        send({"type": "update", "ok": False, "output": ROUTE_GONE})
+        return
     ytdlp = find_ytdlp(msg.get("ytdlpPath"))
     if not ytdlp:
         send({"type": "update", "ok": False, "output": "yt-dlp not found"})
@@ -330,15 +491,24 @@ def handle_update(msg):
     if ytdlp == [OWN_YTDLP]:
         # The one VidGrab fetched: replaced the way it was fetched, checked
         # against yt-dlp's signature.
-        ok, output = install_ytdlp(update=True)
+        ok, output = install_ytdlp(update=True, route=route)
         send({"type": "update", "ok": ok, "output": output})
         return
     if ytdlp[0] == sys.executable:
-        cmd = [sys.executable, "-m", "pip", "install", "--user", "-U", "yt-dlp"]
+        # --isolated: no proxy from pip's own settings or the environment.
+        cmd = [sys.executable, "-m", "pip", "install", "--isolated", "--user", "-U", "yt-dlp"]
+        if route and route != "direct":
+            if not route.startswith("http"):
+                send({"type": "update", "ok": False, "output":
+                      "pip can't go through Wisp's SOCKS proxy, so yt-dlp wasn't updated (it would have gone "
+                      "straight from your own address). Update it with your package manager, or remove it "
+                      "and let VidGrab fetch its own."})
+                return
+            cmd[4:4] = ["--proxy", route]
     else:
-        cmd = ytdlp + ["-U"]
+        cmd = ytdlp + ytdlp_proxy_args(route) + ["-U"]
     try:
-        code, out, err = run_capture(cmd, timeout=300)
+        code, out, err = run_capture(cmd, timeout=300, route=route)
         send({"type": "update", "ok": code == 0, "output": (out + "\n" + err).strip()})
     except Exception as e:  # noqa: BLE001
         send({"type": "update", "ok": False, "output": str(e)})
@@ -446,7 +616,7 @@ def build_download_cmd(ytdlp, msg):
     out_dir = os.path.expanduser(opts.get("outputDir") or default_download_dir())
     os.makedirs(out_dir, exist_ok=True)
     template = safe_template(opts.get("filenameTemplate") or DEFAULT_TEMPLATE)
-    if template == OLD_DEFAULT_TEMPLATE:
+    if template in OLD_DEFAULT_TEMPLATES:
         template = DEFAULT_TEMPLATE
     if msg.get("pageTitle"):
         template = page_title_template(msg["pageTitle"], out_dir)
@@ -480,7 +650,9 @@ def build_download_cmd(ytdlp, msg):
     if not opts.get("allowPlaylist"):
         cmd.append("--no-playlist")
     if opts.get("embedMetadata") and ffmpeg:
-        cmd += ["--embed-metadata", "--embed-thumbnail"]
+        cmd += ["--embed-metadata", "--embed-thumbnail",
+                # Not the page's address: the file wouldn't say where it came from.
+                "--parse-metadata", ":(?P<meta_purl>)", "--parse-metadata", ":(?P<meta_comment>)"]
     if opts.get("subtitles"):
         # A stream's subtitle tracks are often named ("English") rather
         # than coded ("en"), so take all of them there.
@@ -499,6 +671,7 @@ def build_download_cmd(ytdlp, msg):
         # Matching the browser keeps sites from serving a different page.
         cmd += ["--user-agent", msg["userAgent"]]
     cmd += extra_args(opts.get("extraArgs") or "")
+    cmd += ytdlp_proxy_args(route_of(msg))
     cmd += ["--", msg["url"]]
     return cmd, out_dir
 
@@ -563,6 +736,7 @@ def handle_download(msg):
         send({"type": "job", "id": job_id, "state": "error", "error": str(e)})
         return
     send({"type": "job", "id": job_id, "state": "running", "dir": out_dir})
+    msg["route"] = route_of(msg)
     subs = [dict(s, url=https_url(s.get("url"))) for s in msg.get("subtitles") or [] if https_url(s.get("url"))][:20]
     threading.Thread(target=run_job_then_forget_cookies, args=(job_id, cmd, msg.get("options", {}), subs, msg), daemon=True).start()
 
@@ -598,7 +772,7 @@ def save_subtitles(video, subs, msg):
     for n, s in enumerate(subs, 1):
         try:
             req = urllib.request.Request(s["url"], headers=headers)
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with opener_for(msg.get("route")).open(req, timeout=30) as r:
                 data = r.read(SUB_LIMIT + 1)
         except Exception:  # noqa: BLE001
             continue
@@ -700,6 +874,17 @@ def embed_subtitles(video, subs):
 VIDEO_FILE = re.compile(r"\.(mp4|mkv|webm|mov|m4v)$", re.I)
 
 
+def strip_origin(path):
+    """Take off the attributes some tools leave on a download saying where
+    it came from (user.xdg.origin.url, user.xdg.referrer.url, ...)."""
+    try:
+        for name in os.listxattr(path):
+            if name.startswith(("user.xdg.", "user.dublincore.", "user.mime_type")) or "origin" in name or "referrer" in name:
+                os.removexattr(path, name)
+    except (OSError, AttributeError):
+        pass
+
+
 def downloaded_video(files, cmd, since):
     """The video file a job made: the one yt-dlp reported if it's there,
     else the newest video in the download folder written since the start."""
@@ -715,8 +900,9 @@ def downloaded_video(files, cmd, since):
 
 def run_job(job_id, cmd, opts, subs=(), msg=None):
     started = time.time() - 2
-    code, last_err, files = run_ytdlp(job_id, cmd)
-    if is_failure(code) and NEEDS_LOGIN.search(last_err) and opts.get("useCookies", "auto") == "auto" \
+    route = (msg or {}).get("route")
+    code, last_err, files = run_ytdlp(job_id, cmd, route)
+    if is_failure(code) and NEEDS_LOGIN.search(last_err) and opts.get("useCookies") == "auto" \
             and "--cookies-from-browser" not in cmd and "--cookies" not in cmd:
         args = cookie_args(opts)
         if args:
@@ -724,21 +910,29 @@ def run_job(job_id, cmd, opts, subs=(), msg=None):
                   "stage": "Site wants a login, retrying with your browser cookies…"})
             sep = cmd.index("--")
             cmd = cmd[:sep] + args + cmd[sep:]
-            code, last_err, files = run_ytdlp(job_id, cmd)
+            code, last_err, files = run_ytdlp(job_id, cmd, route)
     if is_failure(code) and EXTRACTOR_BROKEN.search(last_err) \
             and "--force-generic-extractor" not in cmd:
         send({"type": "job", "id": job_id, "state": "running", "percent": 0,
               "stage": "Site support failed, trying generic page scan…"})
         sep = cmd.index("--")
         cmd = cmd[:sep] + ["--force-generic-extractor"] + cmd[sep:]
-        code, generic_err, files = run_ytdlp(job_id, cmd)
+        code, generic_err, files = run_ytdlp(job_id, cmd, route)
         if is_failure(code):
             last_err = f"{last_err}\nGeneric fallback: {generic_err or f'exit code {code}'}"
     if is_failure(code) and "File name too long" in last_err:
         send({"type": "job", "id": job_id, "state": "running", "percent": 0,
               "stage": "File name too long, retrying with a shorter name…"})
-        code, last_err, files = run_ytdlp(job_id, with_template(cmd, SHORT_TEMPLATE))
+        code, last_err, files = run_ytdlp(job_id, with_template(cmd, SHORT_TEMPLATE), route)
+    with jobs_lock:
+        already_there = job_id in already_saved
+        already_saved.discard(job_id)
+    if code == 0 and already_there and "--no-playlist" in cmd:
+        # Another video of the same name was saved before: keep both.
+        code, last_err, files = run_ytdlp(job_id, with_template(cmd, SECOND_TEMPLATE), route)
     if code == 0:
+        for f in files:
+            strip_origin(f)
         video = downloaded_video(files, cmd, started) if subs else None
         if subs and video:
             send({"type": "job", "id": job_id, "state": "running", "stage": "Saving subtitles…"})
@@ -749,10 +943,13 @@ def run_job(job_id, cmd, opts, subs=(), msg=None):
     elif code < 0 or code == 130:
         send({"type": "job", "id": job_id, "state": "cancelled"})
     else:
-        send({"type": "job", "id": job_id, "state": "error", "error": last_err or f"yt-dlp exited with code {code}"})
+        error = last_err or f"yt-dlp exited with code {code}"
+        if NEEDS_LOGIN.search(last_err) and "--cookies" not in cmd:
+            error += "\nThis site wants you logged in: turn on “Use my login” in VidGrab's settings to let it use your login."
+        send({"type": "job", "id": job_id, "state": "error", "error": error})
 
 
-def run_ytdlp(job_id, cmd):
+def run_ytdlp(job_id, cmd, route=None):
     """Runs yt-dlp, streaming progress to the browser. Returns (code, last error, files)."""
     try:
         proc = subprocess.Popen(
@@ -762,7 +959,7 @@ def run_ytdlp(job_id, cmd):
             stdin=subprocess.DEVNULL,
             text=True,
             bufsize=1,
-            env=env_with_paths(),
+            env=env_with_paths(route),
             start_new_session=True,
         )
     except Exception as e:  # noqa: BLE001
@@ -792,6 +989,9 @@ def run_ytdlp(job_id, cmd):
             files.append(line[len("[vg-file] "):])
         elif line.startswith("[Merger]") or line.startswith("[ExtractAudio]") or line.startswith("[FixupM3u8]"):
             send({"type": "job", "id": job_id, "state": "running", "stage": "Processing…"})
+        elif line.startswith("[download] ") and line.endswith("has already been downloaded"):
+            with jobs_lock:
+                already_saved.add(job_id)
         elif line.startswith("ERROR:"):
             last_err = line
         elif line.startswith("WARNING:"):
@@ -815,7 +1015,7 @@ def handle_cancel(msg):
             pass
 
 
-def install_ytdlp(update=False):
+def install_ytdlp(update=False, route=None):
     """Fetch the official yt-dlp release into DATA_DIR (as install.sh --fetch-ytdlp does),
     or with `update` replace the one there if a newer release is out. The file
     is kept only if its hash is in the release's signed list (see
@@ -826,15 +1026,15 @@ def install_ytdlp(update=False):
         tmp = OWN_YTDLP + ".tmp"
         try:
             os.makedirs(DATA_DIR, exist_ok=True)
-            sums = fetch(YTDLP_RELEASE + "SHA2-256SUMS", 1 << 16)
-            signed_at = verify_signature(sums, fetch(YTDLP_RELEASE + "SHA2-256SUMS.sig", 1 << 14))
+            sums = fetch(YTDLP_RELEASE + "SHA2-256SUMS", 1 << 16, route)
+            signed_at = verify_signature(sums, fetch(YTDLP_RELEASE + "SHA2-256SUMS.sig", 1 << 14, route))
             if signed_at < last_signed():
                 raise ValueError("the release offered is older than the one already seen")
             want = listed_sha256(sums, "yt-dlp")
             if os.access(OWN_YTDLP, os.X_OK) and file_sha256(OWN_YTDLP) == want:
                 touch(UPDATE_STAMP)
                 return True, "yt-dlp is up to date"
-            data = fetch(YTDLP_RELEASE + "yt-dlp", 64 << 20)
+            data = fetch(YTDLP_RELEASE + "yt-dlp", 64 << 20, route)
             if hashlib.sha256(data).hexdigest() != want:
                 raise ValueError("the download doesn't match yt-dlp's signed list of hashes; try again later")
             with open(tmp, "wb") as f:
@@ -855,7 +1055,7 @@ def install_ytdlp(update=False):
 
 
 def install_then_status(msg):
-    ok, output = install_ytdlp()
+    ok, output = install_ytdlp(route=route_of(msg))
     if not ok:
         send({"type": "status", "hostVersion": HOST_VERSION, "error": output})
         return
@@ -863,7 +1063,7 @@ def install_then_status(msg):
 
 
 def handle_install(msg):
-    ok, output = install_ytdlp()
+    ok, output = install_ytdlp(route=route_of(msg))
     send({"type": "update", "ok": ok, "output": output})
 
 
@@ -872,7 +1072,7 @@ def touch(path):
         os.utime(path, None)
 
 
-def update_if_due():
+def update_if_due(route=None):
     """Keep VidGrab's own yt-dlp current: sites change, yt-dlp follows within days."""
     try:
         if time.time() - os.path.getmtime(UPDATE_STAMP) < UPDATE_EVERY:
@@ -884,7 +1084,7 @@ def update_if_due():
     try:
         touch(UPDATE_STAMP)
         # Not yt-dlp's own updater: that one doesn't check the signature.
-        install_ytdlp(update=True)
+        install_ytdlp(update=True, route=route)
     except Exception:  # noqa: BLE001
         pass
 

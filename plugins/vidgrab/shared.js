@@ -1,14 +1,18 @@
 // Settings shared by the background script, the popup and the settings page.
 const DEFAULT_OPTIONS = {
   outputDir: "",
-  filenameTemplate: "%(title).150B [%(id).30B].%(ext)s",
+  filenameTemplate: "%(title).150B.%(ext)s",
   defaultPreset: "best",
   allowPlaylist: false,
   embedMetadata: true,
   subtitles: true,
   subLangs: "en.*",
   sponsorblock: false,
-  useCookies: "auto", // "off" | "auto" (retry when a site asks for a login) | "always"
+  // Whether yt-dlp gets your cookies for the site: "off" (unless you turn
+  // it on, a download never carries your login), "auto" (retry with them
+  // when a site asks for a login) or "always". (A new name: the old
+  // "useCookies" was on by default, so it isn't read any more.)
+  useLogin: "off",
   ytdlpPath: "",
   extraArgs: "",
   notify: true,
@@ -27,5 +31,7 @@ const PRESETS = [
 ];
 
 async function getOptions() {
-  return Object.assign({}, DEFAULT_OPTIONS, (await wisp.storage.get("options")) || {});
+  const opts = Object.assign({}, DEFAULT_OPTIONS, (await wisp.storage.get("options")) || {});
+  opts.useCookies = ["auto", "always"].includes(opts.useLogin) ? opts.useLogin : "off";
+  return opts;
 }

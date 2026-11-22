@@ -203,7 +203,7 @@ class Install(unittest.TestCase):
         v.UPDATE_STAMP = os.path.join(self.dir, "last-update-check")
         v.SIGNED_STAMP = os.path.join(self.dir, "yt-dlp-signed")
         self.ran = []
-        v.run_capture = lambda cmd, timeout=60: (self.ran.append(cmd), (0, "test", ""))[1]
+        v.run_capture = lambda cmd, timeout=60, route=None: (self.ran.append(cmd), (0, "test", ""))[1]
 
     def tearDown(self):
         v.DATA_DIR, v.OWN_YTDLP, v.UPDATE_STAMP, v.SIGNED_STAMP, v.fetch, v.run_capture = self.saved
@@ -211,7 +211,7 @@ class Install(unittest.TestCase):
 
     def serve(self, binary, sums=SUMS, sig=SIG):
         files = {"SHA2-256SUMS": sums, "SHA2-256SUMS.sig": sig, "yt-dlp": binary}
-        v.fetch = lambda url, limit: files[url.rsplit("/", 1)[1]]
+        v.fetch = lambda url, limit, route=None: files[url.rsplit("/", 1)[1]]
 
     def test_a_download_not_in_the_signed_list_is_never_kept_or_run(self):
         self.serve(b"#!/bin/sh\necho not yt-dlp\n")
@@ -227,7 +227,7 @@ class Install(unittest.TestCase):
         self.serve(binary, sums=sums)
         asked = []
         files = v.fetch
-        v.fetch = lambda url, limit: (asked.append(url.rsplit("/", 1)[1]), files(url, limit))[1]
+        v.fetch = lambda url, limit, route=None: (asked.append(url.rsplit("/", 1)[1]), files(url, limit, route))[1]
         ok, _ = v.install_ytdlp()
         self.assertFalse(ok)
         self.assertEqual(asked, ["SHA2-256SUMS", "SHA2-256SUMS.sig"])
@@ -273,6 +273,118 @@ class OpenShowsFolders(unittest.TestCase):
             self.assertIsNone(v.folder_to_show("/no/such/place/x"))
         finally:
             shutil.rmtree(d)
+
+class Route(unittest.TestCase):
+    """Everything the helper fetches goes the way Wisp's pages go, and nowhere
+    when Wisp can't tell which way that is."""
+
+    def test_routes_read(self):
+        self.assertIsNone(v.route_of({}))
+        self.assertEqual(v.route_of({"route": "direct"}), "direct")
+        self.assertEqual(v.route_of({"route": "socks5h://127.0.0.1:9050"}), "socks5h://127.0.0.1:9050")
+        self.assertEqual(v.route_of({"route": "http://u:p@[::1]:8080/"}), "http://u:p@[::1]:8080")
+        for bad in ["blocked", "", None, 5, "socks5://127.0.0.1:9050", "ftp://x:1", "http://x", "http://x:1/a", "http://x:1 --exec"]:
+            with self.subTest(route=bad):
+                self.assertEqual(v.route_of({"route": bad}), v.BLOCKED)
+
+    def test_ytdlp_gets_the_route(self):
+        self.assertEqual(v.ytdlp_proxy_args(None), [])
+        self.assertEqual(v.ytdlp_proxy_args("direct"), ["--proxy", ""])
+        self.assertEqual(v.ytdlp_proxy_args("socks5h://127.0.0.1:9050"), ["--proxy", "socks5h://127.0.0.1:9050"])
+        with self.assertRaises(v.RouteError):
+            v.ytdlp_proxy_args(v.BLOCKED)
+        with self.assertRaises(v.RouteError):
+            v.opener_for(v.BLOCKED)
+
+    def test_environment_proxies_are_replaced(self):
+        old = dict(os.environ)
+        try:
+            os.environ["HTTPS_PROXY"] = "http://elsewhere:1"
+            os.environ["all_proxy"] = "socks5://elsewhere:2"
+            env = v.env_with_paths("direct")
+            self.assertFalse([k for k in env if k.lower().endswith("_proxy")])
+            env = v.env_with_paths("socks5h://127.0.0.1:9050")
+            self.assertEqual(env["HTTPS_PROXY"], "socks5h://127.0.0.1:9050")
+            self.assertEqual(env["all_proxy"], "socks5h://127.0.0.1:9050")
+            self.assertEqual(v.env_with_paths(None)["HTTPS_PROXY"], "http://elsewhere:1")
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+
+    def test_a_blocked_route_downloads_nothing(self):
+        sent = []
+        old = v.send, v.find_ytdlp
+        v.send, v.find_ytdlp = sent.append, lambda *_: ["yt-dlp"]
+        try:
+            v.handle_download({"id": "1", "url": "https://example.com/v", "route": "blocked", "options": {"outputDir": tempfile.mkdtemp()}})
+            v.handle_update({"route": "blocked"})
+        finally:
+            v.send, v.find_ytdlp = old
+        self.assertEqual(sent[0]["state"], "error")
+        self.assertIn("isn't going online", sent[0]["error"])
+        self.assertFalse(sent[1]["ok"])
+
+    def test_fetches_go_through_a_socks_proxy_by_name(self):
+        import socket
+        import threading
+        asked = []
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+
+        def proxy():
+            c, _ = srv.accept()
+            with c:
+                assert c.recv(3) == b"\x05\x01\x00"
+                c.sendall(b"\x05\x00")
+                head = v.recv_exact(c, 5)
+                name = v.recv_exact(c, head[4])
+                port = int.from_bytes(v.recv_exact(c, 2), "big")
+                asked.append((head[3], name.decode(), port))
+                c.sendall(b"\x05\x00\x00\x01" + bytes(6))
+                req = b""
+                while b"\r\n\r\n" not in req:
+                    req += c.recv(4096)
+                c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
+
+        t = threading.Thread(target=proxy, daemon=True)
+        t.start()
+        route = "socks5h://127.0.0.1:%d" % srv.getsockname()[1]
+        data = v.fetch("http://someplace.onion/x", 100, route)
+        t.join(5)
+        srv.close()
+        self.assertEqual(data, b"hello")
+        # The name went to the proxy (type 3), never looked up here.
+        self.assertEqual(asked, [(3, "someplace.onion", 80)])
+
+
+class FilesDontSayWhereFrom(unittest.TestCase):
+    def test_no_video_id_in_names(self):
+        self.assertNotIn("%(id", v.DEFAULT_TEMPLATE)
+        self.assertNotIn("%(id", v.SECOND_TEMPLATE)
+        out = tempfile.mkdtemp()
+        try:
+            for old in v.OLD_DEFAULT_TEMPLATES:
+                cmd, _ = v.build_download_cmd(["yt-dlp"], {"url": "https://example.com/v", "options": {"outputDir": out, "filenameTemplate": old}})
+                self.assertEqual(cmd[cmd.index("-o") + 1], v.DEFAULT_TEMPLATE)
+        finally:
+            shutil.rmtree(out)
+
+    def test_origin_attributes_are_removed(self):
+        folder = tempfile.mkdtemp(dir=os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(folder, "v.mp4")
+        try:
+            open(path, "wb").close()
+            try:
+                os.setxattr(path, "user.xdg.origin.url", b"https://example.com/watch?v=abc")
+                os.setxattr(path, "user.keep", b"1")
+            except OSError:
+                self.skipTest("no user attributes on this file system")
+            v.strip_origin(path)
+            self.assertEqual(os.listxattr(path), ["user.keep"])
+        finally:
+            shutil.rmtree(folder)
+
 
 if __name__ == "__main__":
     unittest.main()

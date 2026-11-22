@@ -113,7 +113,7 @@ async function startDownload({ url, preset, referer, title, nameFromPage }) {
   // Wisp keeps cookies in memory, so the helper gets this site's cookies
   // with the job (used only if the site asks for a login, unless "always").
   let cookies;
-  if (opts.useCookies !== "off") {
+  if (opts.useCookies === "auto" || opts.useCookies === "always") {
     try { cookies = await wisp.cookies.netscape(url); } catch {}
   }
   // A stream's subtitles are separate files the player fetched: the
