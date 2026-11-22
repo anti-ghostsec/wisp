@@ -46,6 +46,8 @@ pub struct Shared {
     /// Whether the content filter lets .onion addresses through (only while
     /// they'd go to Tor).
     onion_open: Cell<bool>,
+    /// Whether pages' languages have been set once (see `update_https_filter`).
+    languages_set: Cell<bool>,
     /// Goes in the history page's "Clear history" link: only that page
     /// knows it, so no other page can clear history by opening the link.
     history_token: String,
@@ -201,6 +203,7 @@ impl Shared {
             popup_allowed: RefCell::new(HashSet::new()),
             http_allowed: RefCell::new(HashSet::new()),
             onion_open: Cell::new(false),
+            languages_set: Cell::new(false),
             history_token: random_token(),
             views: RefCell::new(Vec::new()),
             tab_anchor: RefCell::default(),
@@ -797,7 +800,14 @@ impl Shared {
             // The settings as they are now, after the wait: a later call
             // that got here first is never undone with older ones.
             let Some(me) = me.upgrade() else { return };
-            me.onion_open.set(onion_open);
+            let was_open = me.onion_open.replace(onion_open);
+            if was_open != onion_open || !me.languages_set.replace(true) {
+                // Over Tor, pages get the language most Tor users send
+                // (as Tor Browser does), not this computer's.
+                let langs = if onion_open { vec!["en-US".to_string()] } else { system_languages() };
+                let langs: Vec<&str> = langs.iter().map(String::as_str).collect();
+                me.context.set_preferred_languages(&langs);
+            }
             let block_onion = !onion_open;
             let mut allowed: Vec<String> = me.http_allowed.borrow().iter().cloned().collect();
             allowed.sort();
@@ -855,6 +865,26 @@ fn watch_onion_route(shared: &Rc<Shared>) {
         }
         glib::ControlFlow::Continue
     });
+}
+
+/// This computer's languages as pages are told them ("en-GB", "en"), as
+/// WebKit works them out by itself.
+fn system_languages() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for name in glib::language_names() {
+        let name = name.as_str();
+        if name == "C" || name == "POSIX" || name.contains(['.', '@']) {
+            continue;
+        }
+        let tag = name.replace('_', "-");
+        if !out.contains(&tag) {
+            out.push(tag);
+        }
+    }
+    if out.is_empty() {
+        out.push("en-US".into());
+    }
+    out
 }
 
 fn onion_capable(proxy: &str) -> bool {
