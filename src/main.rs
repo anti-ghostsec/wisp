@@ -72,10 +72,14 @@ fn main() -> glib::ExitCode {
     let on_exit = shared.clone();
     // Links given while the vault's window is up.
     let waiting: Rc<RefCell<Option<Vec<String>>>> = Rc::new(RefCell::new(None));
-    let open = {
+    let get_shared = {
         let shared = shared.clone();
+        Rc::new(move |app: &gtk::Application| shared.borrow_mut().get_or_insert_with(|| Shared::new(app, cfg.take().unwrap_or_default())).clone())
+    };
+    let open = {
+        let get_shared = get_shared.clone();
         Rc::new(move |app: &gtk::Application, uris: Vec<String>, starting: bool| {
-            let shared = shared.borrow_mut().get_or_insert_with(|| Shared::new(app, cfg.take().unwrap_or_default())).clone();
+            let shared = get_shared(app);
             // No page loads before the content filters (ad and tracker
             // blocking, the HTTPS upgrade) are in force.
             let hold = app.hold();
@@ -114,17 +118,28 @@ fn main() -> glib::ExitCode {
             let first = waiting.borrow().is_none();
             waiting.borrow_mut().get_or_insert_with(Vec::new).extend(uris);
             if first {
+                // The box goes on the browser's window (blank until it's
+                // answered), as it does when asked for from the menu, not
+                // in a window of its own.
                 let kind = if vault::get().exists() { vault::Ask::Unlock } else { vault::Ask::Setup };
                 let hold = app.hold();
-                let (app2, open, waiting) = (app.clone(), open.clone(), waiting.clone());
-                vault::ask(app, None, kind, move |_| {
-                    let uris = waiting.borrow_mut().take().unwrap_or_default();
-                    // Closed with its X: Wisp quits, links and all ("Not
-                    // now" is how it opens locked).
-                    if !vault::closed() {
-                        open(&app2, uris, true);
-                    }
-                    drop(hold);
+                let shared = get_shared(app);
+                let (app2, waiting) = (app.clone(), waiting.clone());
+                shared.clone().plugins.when_filters_ready(move || {
+                    let win = shared.waiting_window();
+                    vault::ask(&app2, Some(&win.gtk_window()), kind, move |_| {
+                        let uris = waiting.borrow_mut().take().unwrap_or_default();
+                        // Closed with its X: Wisp quits, links and all ("Not
+                        // now" is how it opens locked).
+                        if vault::closed() {
+                            win.gtk_window().close();
+                        } else {
+                            win.fill_after_unlock(&uris);
+                            after_first_window(&shared, &win);
+                            test_hooks(&win);
+                        }
+                        drop(hold);
+                    });
                 });
             }
             return glib::ExitCode::SUCCESS;
@@ -149,11 +164,22 @@ fn open_window(shared: &Rc<Shared>, uris: Vec<String>, starting: bool) {
     // Links from a later launch open as tabs in the window already open.
     let reused = if !starting && !uris.is_empty() { shared.open_in_tabs(&uris) } else { None };
     let window = restored.or(reused).unwrap_or_else(|| BrowserWindow::new(shared, &uris));
-    window.warn_if_outdated();
     if starting {
-        shared.ask_about_shadowed_plugins();
-        shared.ask_about_new_plugins();
+        after_first_window(shared, &window);
+    } else {
+        window.warn_if_outdated();
     }
+    test_hooks(&window);
+}
+
+/// What follows the first window of a run.
+fn after_first_window(shared: &Rc<Shared>, window: &Rc<BrowserWindow>) {
+    window.warn_if_outdated();
+    shared.ask_about_shadowed_plugins();
+    shared.ask_about_new_plugins();
+}
+
+fn test_hooks(window: &Rc<BrowserWindow>) {
     if let Ok(path) = std::env::var("WISP_SCREENSHOT") {
         let secs = std::env::var("WISP_SCREENSHOT_DELAY").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
         window.screenshot_and_quit(path, std::time::Duration::from_secs(secs));

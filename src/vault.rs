@@ -33,6 +33,21 @@ pub enum Ask {
     Change,
 }
 
+/// On the browser window `parent` (as a modal dialog), which closing takes
+/// it along, as if put off.
+fn attach(window: &gtk::Window, parent: Option<&gtk::Window>) {
+    let Some(p) = parent else { return };
+    window.set_transient_for(Some(p));
+    window.set_modal(true);
+    let w = window.downgrade();
+    p.connect_close_request(move |_| {
+        if let Some(w) = w.upgrade() {
+            w.close();
+        }
+        glib::Propagation::Proceed
+    });
+}
+
 /// The vault's window. `done(true)` once the vault is open (set up, unlocked
 /// or changed), `done(false)` if put off; called once.
 pub fn ask(app: &gtk::Application, parent: Option<&gtk::Window>, kind: Ask, done: impl FnOnce(bool) + 'static) {
@@ -42,10 +57,7 @@ pub fn ask(app: &gtk::Application, parent: Option<&gtk::Window>, kind: Ask, done
         return warn_downgraded(app, parent, done);
     }
     let window = gtk::Window::builder().application(app).title("Wisp password").default_width(440).resizable(false).build();
-    if let Some(p) = parent {
-        window.set_transient_for(Some(p));
-        window.set_modal(true);
-    }
+    attach(&window, parent);
     let done: Rc<RefCell<Option<Done>>> = Rc::new(RefCell::new(Some(Box::new(done))));
     let finish = {
         let (done, window) = (done.clone(), window.clone());
@@ -209,10 +221,7 @@ pub fn ask(app: &gtk::Application, parent: Option<&gtk::Window>, kind: Ask, done
 /// opened unless the user says to go on without one.
 fn warn_downgraded(app: &gtk::Application, parent: Option<&gtk::Window>, done: impl FnOnce(bool) + 'static) {
     let window = gtk::Window::builder().application(app).title("Wisp password").default_width(460).resizable(false).build();
-    if let Some(p) = parent {
-        window.set_transient_for(Some(p));
-        window.set_modal(true);
-    }
+    attach(&window, parent);
     let done: Rc<RefCell<Option<Done>>> = Rc::new(RefCell::new(Some(Box::new(done))));
     let finish = {
         let (done, window) = (done.clone(), window.clone());

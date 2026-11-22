@@ -528,6 +528,12 @@ impl Shared {
         last
     }
 
+    /// A window to put the Wisp password box on at start, before anything
+    /// is open: one blank tab, filled by `fill_after_unlock`.
+    pub fn waiting_window(self: &Rc<Self>) -> Rc<BrowserWindow> {
+        BrowserWindow::new(self, &["about:blank".to_string()])
+    }
+
     /// Pages see `prefers-color-scheme: dark` (and the UI goes dark) while
     /// an enabled plugin asks for it, e.g. Dark Mode.
     fn apply_color_scheme(&self) {
@@ -2079,6 +2085,51 @@ impl BrowserWindow {
     /// A tab for a page's own pop-up, which WebKit fills: it has a view.
     fn new_popup_tab(self: &Rc<Self>, related: &WebView) -> WebView {
         self.open_tab(None, Some(related), true, None).expect("a pop-up's tab has a view")
+    }
+
+    /// The window opened while the vault was asked for (see
+    /// `Shared::waiting_window`), once it's open or put off: `uris` if any,
+    /// else the last session's tabs (its other windows beside this one),
+    /// else a new tab. The blank tab it held goes.
+    pub fn fill_after_unlock(self: &Rc<Self>, uris: &[String]) {
+        let blank: Vec<Rc<Tab>> = self.tabs.borrow().clone();
+        let shared = self.shared.clone();
+        if crate::vault::get().is_open() {
+            // Bookmarks (and the bar) come now it's open.
+            shared.sync.warm_up();
+        }
+        let saved: Vec<Vec<(String, String)>> = if uris.is_empty() && shared.config.borrow().restore_tabs {
+            shared.state.load_session().into_iter().filter(|t| !t.is_empty()).collect()
+        } else {
+            Vec::new()
+        };
+        if !uris.is_empty() {
+            for (i, u) in uris.iter().enumerate() {
+                self.new_tab(Some(&shared.resolve_input(u)), None, i == 0);
+            }
+        } else if let Some((first, others)) = saved.split_first() {
+            self.new_tab(Some(&first[0].0), None, true);
+            for (uri, title) in &first[1..] {
+                self.add_lazy_tab(uri, title);
+            }
+            for tabs in others {
+                let win = BrowserWindow::new(&shared, &[tabs[0].0.clone()]);
+                for (uri, title) in &tabs[1..] {
+                    win.add_lazy_tab(uri, title);
+                }
+            }
+        } else {
+            self.new_tab(None, None, true);
+        }
+        for tab in blank {
+            self.close_tab(&tab);
+        }
+        self.window.present();
+    }
+
+    /// The GTK window, to put a dialog on.
+    pub fn gtk_window(&self) -> gtk::Window {
+        self.window.clone().upcast()
     }
 
     /// A restored tab at the end of the strip that loads when first shown.
