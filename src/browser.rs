@@ -2424,6 +2424,25 @@ impl BrowserWindow {
             true
         });
 
+        // A tab opened from a page (a pop-up, a link to a new tab) whose
+        // first address the content filter blocks (an ad, a tracker) is
+        // closed again rather than left showing WebKit's error page.
+        let w = Rc::downgrade(self);
+        let t = Rc::downgrade(tab);
+        view.connect_load_failed(move |v, _, _, error| {
+            let (Some(win), Some(tab)) = (w.upgrade(), t.upgrade()) else { return false };
+            if tab.opened_from.get().is_none() || v.back_forward_list().and_then(|l| l.back_item()).is_some() || !is_content_blocked(error) {
+                return false;
+            }
+            let (w, t) = (Rc::downgrade(&win), Rc::downgrade(&tab));
+            glib::idle_add_local_once(move || {
+                if let (Some(win), Some(tab)) = (w.upgrade(), t.upgrade()) {
+                    win.close_tab(&tab);
+                }
+            });
+            true
+        });
+
         let t = Rc::downgrade(tab);
         view.connect_load_failed(move |v, _, failing_uri, error| {
             let Some(tab) = t.upgrade() else { return false };
@@ -4026,6 +4045,12 @@ fn next_tab_id() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The content filter stopped the load (WebKit's "The URL was blocked by
+/// a content blocker"), which WebKit reports with no error code of its own.
+fn is_content_blocked(error: &glib::Error) -> bool {
+    error.message().contains("content blocker")
 }
 
 fn is_cancellation(error: &glib::Error) -> bool {
