@@ -43,6 +43,9 @@ pub struct Shared {
     /// Sites (host and port, see `privacy::http_site`) the user explicitly
     /// allowed to load over plain HTTP this session.
     http_allowed: RefCell<HashSet<String>>,
+    /// Whether the content filter lets .onion addresses through (only while
+    /// they'd go to Tor).
+    onion_open: Cell<bool>,
     /// Goes in the history page's "Clear history" link: only that page
     /// knows it, so no other page can clear history by opening the link.
     history_token: String,
@@ -197,6 +200,7 @@ impl Shared {
             sync,
             popup_allowed: RefCell::new(HashSet::new()),
             http_allowed: RefCell::new(HashSet::new()),
+            onion_open: Cell::new(false),
             history_token: random_token(),
             views: RefCell::new(Vec::new()),
             tab_anchor: RefCell::default(),
@@ -241,6 +245,7 @@ impl Shared {
         shared.plugins.sync_backgrounds();
         shared.register_scheme();
         shared.update_https_filter(|| {});
+        watch_onion_route(&shared);
         shared.install_accels();
         // Nothing saved or opened through Wisp goes into GTK's list of
         // recent files (recently-used.xbel), which other apps show.
@@ -788,10 +793,12 @@ impl Shared {
         let guard = plugins.hold_filters();
         let me = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let block_onion = !onion_proxied().await;
+            let onion_open = onion_proxied().await;
             // The settings as they are now, after the wait: a later call
             // that got here first is never undone with older ones.
             let Some(me) = me.upgrade() else { return };
+            me.onion_open.set(onion_open);
+            let block_onion = !onion_open;
             let mut allowed: Vec<String> = me.http_allowed.borrow().iter().cloned().collect();
             allowed.sort();
             let rules = privacy::own_filter(me.config.borrow().https_only, &allowed, block_onion);
@@ -815,14 +822,49 @@ impl Shared {
     }
 }
 
-/// Whether .onion addresses go through a proxy (Tor, set as the system's
-/// proxy), which looks their names up itself. Without one they're refused:
-/// the system's DNS servers would be asked for them.
-async fn onion_proxied() -> bool {
+/// Whether .onion addresses go through a SOCKS proxy (Tor, set as the
+/// system's proxy), which looks their names up itself. Otherwise they're
+/// refused: going direct, the system's DNS servers would be asked for them,
+/// and an HTTP proxy (Clash, a company proxy) would ask its own. Asked
+/// again for each .onion page and every few seconds (see `watch_onion_route`).
+pub(crate) async fn onion_proxied() -> bool {
     gio::ProxyResolver::default()
         .lookup_future("http://wisp-check.onion/")
         .await
-        .is_ok_and(|proxies| proxies.iter().any(|p| !p.starts_with("direct://")))
+        .is_ok_and(|proxies| proxies.first().is_some_and(|p| onion_capable(p)))
+}
+
+/// A proxy that resolves names itself and is what Tor offers.
+/// Every few seconds: if Tor (as the system's proxy) came or went, open or
+/// close .onion addresses in the content filter, so a page's pictures and
+/// scripts at .onion hosts never go direct once Tor is gone.
+fn watch_onion_route(shared: &Rc<Shared>) {
+    let me = Rc::downgrade(shared);
+    let checking = Rc::new(Cell::new(false));
+    glib::timeout_add_seconds_local(3, move || {
+        let Some(shared) = me.upgrade() else { return glib::ControlFlow::Break };
+        if !checking.replace(true) {
+            let checking = checking.clone();
+            glib::spawn_future_local(async move {
+                let ok = onion_proxied().await;
+                checking.set(false);
+                if shared.onion_open.get() != ok {
+                    shared.update_https_filter(|| {});
+                }
+            });
+        }
+        glib::ControlFlow::Continue
+    });
+}
+
+fn onion_capable(proxy: &str) -> bool {
+    let scheme = proxy.split_once("://").map(|(s, _)| s.to_ascii_lowercase()).unwrap_or_default();
+    matches!(scheme.as_str(), "socks" | "socks5" | "socks5h" | "socks4a")
+}
+
+pub(crate) fn is_onion(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    host == "onion" || host.ends_with(".onion")
 }
 
 /// The one use of "Continue over HTTP" a "secure connection failed" page
@@ -1524,7 +1566,16 @@ impl BrowserWindow {
 
         let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         buttons.set_halign(gtk::Align::End);
-        let create = gtk::Button::with_label("Create new account");
+        // Once connected, a new account replaces this one, with everything in
+        // it: the old ID and password then open nothing.
+        let connected = self.shared.sync.account().is_some();
+        let create = gtk::Button::with_label(if connected { "Replace ID and password" } else { "Create new account" });
+        if connected {
+            create.set_tooltip_text(Some(
+                "Moves your bookmarks and passwords to a new sync ID and password, and erases the copy under the \
+                 old ones. Use it if someone may know them. Other devices need the new ones.",
+            ));
+        }
         let use_it = gtk::Button::with_label("Use this account");
         use_it.add_css_class("suggested-action");
         let close = gtk::Button::with_label("Close");
@@ -1549,14 +1600,26 @@ impl BrowserWindow {
         create.connect_clicked(move |_| {
             let (sync_, st, svc, idf, pw, b) = (sync_.clone(), st.clone(), svc.clone(), idf.clone(), pw.clone(), b.clone());
             b(true);
-            st.set_text("Creating account…");
+            let replacing = sync_.account().is_some();
+            st.set_text(if replacing { "Moving everything to a new ID and password…" } else { "Creating account…" });
             glib::spawn_future_local(async move {
-                match sync_.create_account(&svc.text()).await {
-                    Ok(a) => {
+                let result = if replacing {
+                    sync_.replace_account().await
+                } else {
+                    sync_.create_account(&svc.text()).await.map(|a| (a, None))
+                };
+                match result {
+                    Ok((a, warning)) => {
+                        svc.set_text(&a.service);
                         idf.set_text(&a.id);
                         pw.set_text(&a.password);
-                        st.set_text("New account created. Keep the ID and password to sync other devices.");
+                        st.set_text(&match (replacing, warning) {
+                            (false, _) => "New account created. Keep the ID and password to sync other devices.".to_string(),
+                            (true, None) => "Replaced. The old ID and password open nothing now. Enter the new ones on your other devices.".to_string(),
+                            (true, Some(w)) => format!("Moved to the new ID and password, but {w}. Try again later."),
+                        });
                     }
+                    Err(e) if replacing => st.set_text(&format!("Nothing was changed: {e}")),
                     Err(e) => st.set_text(&format!("Could not create account: {e}")),
                 }
                 b(false);
@@ -1894,6 +1957,16 @@ impl BrowserWindow {
             let text = format!("{} {}", p.manifest.name, p.manifest.version);
             let name = gtk::Label::builder().label(text.trim()).xalign(0.0).hexpand(true).tooltip_text(p.manifest.description.as_str()).build();
             row.append(&name);
+            let missing = self.shared.plugins.missing_lists(&id);
+            if !missing.is_empty() && p.enabled.get() {
+                let why: Vec<String> = missing.iter().map(|(list, why)| format!("{list} isn't in use: {why}.")).collect();
+                let warn = gtk::Label::builder()
+                    .label(format!("⚠ {} list{} missing", missing.len(), if missing.len() == 1 { "" } else { "s" }))
+                    .tooltip_text(why.join("\n"))
+                    .css_classes(["warning"])
+                    .build();
+                row.append(&warn);
+            }
             if !p.manifest.actions.is_empty() {
                 let in_toolbar = self.shared.in_toolbar(&p);
                 if !in_toolbar && p.enabled.get() {
@@ -2258,6 +2331,18 @@ impl BrowserWindow {
             }
         });
 
+        // A certificate that doesn't check out: no way around it, and no
+        // plain-HTTP offer either (an attacker in the middle would want
+        // exactly that).
+        let t = Rc::downgrade(tab);
+        view.connect_load_failed_with_tls_errors(move |v, failing_uri, _, errors| {
+            if let Some(tab) = t.upgrade() {
+                *tab.http_offer.borrow_mut() = None;
+            }
+            v.load_alternate_html(&certificate_failed_page(failing_uri, errors), failing_uri, None);
+            true
+        });
+
         let t = Rc::downgrade(tab);
         view.connect_load_failed(move |v, _, failing_uri, error| {
             let Some(tab) = t.upgrade() else { return false };
@@ -2354,6 +2439,23 @@ impl BrowserWindow {
             {
                 decision.ignore();
                 win.navigate(&tab, &clean);
+                return true;
+            }
+
+            // A .onion address is opened only if, right now, it would go to
+            // Tor (see `onion_proxied`), never on what was true earlier: if
+            // that proxy has gone, the content filter closes them again too.
+            if privacy::scheme_and_host(&uri).is_some_and(|(_, h)| is_onion(h)) {
+                let decision = decision.clone();
+                let shared = Rc::downgrade(&win.shared);
+                glib::spawn_future_local(async move {
+                    let ok = onion_proxied().await;
+                    if ok { decision.use_() } else { decision.ignore() }
+                    if let Some(shared) = shared.upgrade()
+                        && shared.onion_open.get() != ok {
+                            shared.update_https_filter(|| {});
+                        }
+                });
                 return true;
             }
             false
@@ -3492,6 +3594,15 @@ impl BrowserWindow {
                         });
                         Some("started".into())
                     }
+                    // replace: move the test sync to a new ID and password.
+                    "replace" => {
+                        let sync = s.sync.clone();
+                        glib::spawn_future_local(async move {
+                            let r = sync.replace_account().await.map(|(a, w)| (a.id, w));
+                            println!("perf: replace {r:?}");
+                        });
+                        Some("started".into())
+                    }
                     // bookmarks N: add N test bookmarks.
                     "bookmarks" => {
                         let (n, sync) = (arg.parse::<u32>().unwrap_or(10), s.sync.clone());
@@ -3893,15 +4004,56 @@ fn random_token() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// What's wrong with a certificate, in words.
+fn certificate_problems(errors: gio::TlsCertificateFlags) -> Vec<&'static str> {
+    use gio::TlsCertificateFlags as F;
+    let mut out: Vec<&str> = [
+        (F::UNKNOWN_CA, "it isn't signed by anyone this computer trusts"),
+        (F::BAD_IDENTITY, "it's for a different site"),
+        (F::NOT_ACTIVATED, "it isn't valid yet (or this computer's clock is wrong)"),
+        (F::EXPIRED, "it has expired (or this computer's clock is wrong)"),
+        (F::REVOKED, "it has been revoked"),
+        (F::INSECURE, "it uses insecure cryptography"),
+    ]
+    .into_iter()
+    .filter(|(flag, _)| errors.contains(*flag))
+    .map(|(_, text)| text)
+    .collect();
+    if out.is_empty() {
+        out.push("it couldn't be checked");
+    }
+    out
+}
+
+fn certificate_failed_page(uri: &str, errors: gio::TlsCertificateFlags) -> String {
+    let host = privacy::scheme_and_host(uri).map(|(_, h)| h.to_string()).unwrap_or_else(|| uri.to_string());
+    let problems: String = certificate_problems(errors).iter().map(|p| format!("<li>{}</li>", html_escape(p))).collect();
+    format!(
+        r#"<!doctype html><title>Connection not secure</title>
+<style>body{{font-family:sans-serif;max-width:40em;margin:4em auto;padding:0 1em;line-height:1.5}}</style>
+<h2>Wisp stopped this connection</h2>
+<p>The certificate offered for <code>{host}</code> doesn't check out:</p>
+<ul>{problems}</ul>
+<p>Someone may be intercepting the connection: on this network, at your internet provider, or a proxy
+in between. It can also be a mistake on the site's side, but Wisp can't tell which, so the page wasn't
+loaded and nothing was sent to it.</p>
+<p>Try again later or on another network. Don't enter passwords or other details on this site until it
+loads without this warning.</p>"#,
+        host = html_escape(&host),
+    )
+}
+
 fn https_failed_page(http_uri: &str, reason: &str, token: &str) -> String {
     let allow = format!("wisp-allow-http:{token}");
     format!(
         r#"<!doctype html><title>Secure connection failed</title>
 <style>body{{font-family:sans-serif;max-width:40em;margin:4em auto;padding:0 1em;line-height:1.5}}
 a.btn{{display:inline-block;margin-top:1em;padding:.5em 1em;border:1px solid #c33;border-radius:6px;color:#c33;text-decoration:none}}</style>
-<h2>This site doesn't support a secure connection</h2>
+<h2>A secure connection couldn't be made</h2>
 <p>Wisp tried <b>https://</b> for <code>{site}</code> but it failed: {reason}</p>
-<p>Loading it over plain HTTP lets anyone on your network see and change the page.</p>
+<p>The site may not offer secure connections, or something between you and it (this network, your
+internet provider, a proxy) may be blocking or interfering with them. Wisp can't tell which.</p>
+<p>Over plain HTTP, anyone on that path can see and change the page, including what you type.</p>
 <a class="btn" href="{allow}">Continue over HTTP (insecure)</a>"#,
         site = html_escape(http_uri),
         reason = html_escape(reason),
@@ -4024,6 +4176,30 @@ mod tests {
         let (a, b) = (random_token(), random_token());
         assert_eq!(a.len(), 32);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn onion_names_go_only_to_tor() {
+        for p in ["socks://127.0.0.1:9050", "socks5://127.0.0.1:9050", "SOCKS5H://h:1", "socks4a://h:1"] {
+            assert!(onion_capable(p), "{p}");
+        }
+        for p in ["direct://", "http://127.0.0.1:7890", "https://proxy:443", "socks4://h:1", ""] {
+            assert!(!onion_capable(p), "{p}");
+        }
+        for h in ["abc.onion", "x.ABC.onion", "abc.onion.", "onion"] {
+            assert!(is_onion(h), "{h}");
+        }
+        for h in ["onion.com", "abconion", "a.onion.com"] {
+            assert!(!is_onion(h), "{h}");
+        }
+    }
+
+    #[test]
+    fn certificate_failures_offer_no_way_around() {
+        let page = certificate_failed_page("https://bank.example/login", gio::TlsCertificateFlags::UNKNOWN_CA);
+        assert!(page.contains("bank.example") && page.contains("intercepting"));
+        assert!(!page.contains("wisp-allow-http") && !page.contains("HTTP"));
+        assert_eq!(certificate_problems(gio::TlsCertificateFlags::empty()), ["it couldn't be checked"]);
     }
 
     #[test]

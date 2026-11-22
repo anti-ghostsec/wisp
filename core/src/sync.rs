@@ -34,6 +34,10 @@ const API_VERSION: &str = "1.5.4";
 const ITERATIONS: u32 = 250_000;
 /// xBrowserSync's default container for bookmarks that aren't on a toolbar/menu.
 const OTHER_CONTAINER: &str = "[xbs] Other";
+/// What's left on the service in place of a replaced sync id's data: the
+/// old id and password open nothing any more (see `replace_account`).
+const RETIRED: &str = "wisp-retired";
+const RETIRED_TEXT: &str = "this sync ID and password were replaced on another device and no longer hold anything: enter the new ones in Sync settings";
 /// How long a pulled copy is trusted before asking the service if it changed.
 const FRESH_FOR: Duration = Duration::from_secs(60);
 
@@ -152,12 +156,75 @@ impl Sync {
             .request("GET", &format!("{}/bookmarks/{}", account.service, account.id), None)
             .await?;
         let blob = data["bookmarks"].as_str().unwrap_or("");
+        if blob == RETIRED {
+            return Err(RETIRED_TEXT.into());
+        }
         if !blob.is_empty() {
             decrypt(&key, blob).map_err(|_| "wrong password for this sync id".to_string())?;
         }
         self.set_account(account.clone())?;
         *self.key.borrow_mut() = Some((account, key));
         Ok(())
+    }
+
+    /// A new sync id and password on the same service, for when the old
+    /// ones may be known to someone else: everything here goes up under the
+    /// new ones, then the old copy on the service is overwritten, so the old
+    /// id and password open nothing. Other devices need the new ones.
+    /// Returns the new account, and a warning if the old copy couldn't be
+    /// overwritten (it's then still there, readable with the old password).
+    pub async fn replace_account(self: &Rc<Self>) -> Result<(Account, Option<String>), String> {
+        if !vault::get().is_open() {
+            return Err(vault::LOCKED.into());
+        }
+        let old = self.account().ok_or("sync isn't set up")?;
+        self.ensure_loaded().await?;
+        let _guard = self.lock().await;
+        // The newest copy, with what's waiting here on top.
+        self.check_remote().await?;
+        let (tree, old_updated, sent) = {
+            let state = self.state.borrow();
+            let s = state.as_ref().ok_or("sync data unavailable")?;
+            (s.local.clone(), s.last_updated.clone(), s.pending.len())
+        };
+        let created = self
+            .request("POST", &format!("{}/bookmarks", old.service), Some(json!({ "version": API_VERSION })))
+            .await?;
+        let id = created["id"].as_str().ok_or("service did not return a sync id")?.to_string();
+        let new = Account { service: old.service.clone(), id, password: random_password() };
+        let key = derive_key(&new).await;
+        let updated = self.put(&new, &encrypt(&key, &tree.to_string())?, created["lastUpdated"].as_str().unwrap_or("")).await?;
+        vault::get().set_account(new.clone())?;
+        *self.key.borrow_mut() = Some((new.clone(), key));
+        // Writes made meanwhile go up to the new account.
+        let later = self.state.borrow_mut().as_mut().map(|s| s.pending.split_off(sent.min(s.pending.len()))).unwrap_or_default();
+        let (local, pending) = replay(&tree, later);
+        let waiting = !pending.is_empty();
+        *self.state.borrow_mut() = Some(State { base: tree, last_updated: updated, local, pending, checked: Some(Instant::now()) });
+        self.save_cache();
+        if waiting {
+            self.schedule_flush();
+        }
+        let warning = self.retire(&old, &old_updated).await.err().map(|e| {
+            format!("the old copy on the service couldn't be overwritten ({e}), so the old ID and password still open it")
+        });
+        Ok((new, warning))
+    }
+
+    /// Overwrite `account`'s copy on the service with nothing it can open.
+    async fn retire(&self, account: &Account, last_updated: &str) -> Result<(), String> {
+        let mut last_updated = last_updated.to_string();
+        for _ in 0..3 {
+            match self.put(account, RETIRED, &last_updated).await {
+                Ok(_) => return Ok(()),
+                Err(e) if e.starts_with("409") => {
+                    let url = format!("{}/bookmarks/{}/lastUpdated", account.service, account.id);
+                    last_updated = self.request("GET", &url, None).await?["lastUpdated"].as_str().unwrap_or("").to_string();
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err("it kept changing".into())
     }
 
     /// Forget what's held in memory (the bookmarks and logins, the derived
@@ -424,12 +491,25 @@ impl Sync {
             return Err("the sync service sent an older copy of your bookmarks than the one here, so it wasn't used".into());
         }
         let blob = data["bookmarks"].as_str().unwrap_or("");
+        if blob == RETIRED {
+            return Err(RETIRED_TEXT.into());
+        }
         let key = self.key().await?;
         let base: Json = if blob.is_empty() {
             json!([])
         } else {
             serde_json::from_str(&decrypt(&key, blob)?).map_err(|e| format!("sync data is not valid JSON: {e}"))?
         };
+        // An empty copy where there were entries would delete every
+        // bookmark and password here (and then on every device): not
+        // without your say. Using the account again in Sync settings takes it.
+        let had = self.state.borrow().as_ref().map_or(0, |s| count_entries(&s.base));
+        if had > 0 && count_entries(&base) == 0 {
+            return Err(format!(
+                "the sync service's copy is empty, but this device had {had} bookmarks and passwords, so it wasn't used and \
+                 nothing was deleted here (if you emptied it on purpose, connect to the account again in Sync settings)"
+            ));
+        }
         let mut pending = self.state.borrow_mut().as_mut().map(|s| std::mem::take(&mut s.pending)).unwrap_or_default();
         // What was kept on this device before sync was set up goes up too.
         let carried = read_local();
@@ -510,7 +590,10 @@ impl Sync {
     async fn push(&self, tree: &Json, last_updated: &str) -> Result<String, String> {
         let account = self.account().ok_or("no sync account")?;
         let key = self.key().await?;
-        let blob = encrypt(&key, &tree.to_string())?;
+        self.put(&account, &encrypt(&key, &tree.to_string())?, last_updated).await
+    }
+
+    async fn put(&self, account: &Account, blob: &str, last_updated: &str) -> Result<String, String> {
         let body = json!({ "bookmarks": blob, "lastUpdated": last_updated });
         let res = self
             .request("PUT", &format!("{}/bookmarks/{}", account.service, account.id), Some(body))
@@ -718,6 +801,18 @@ fn collect(node: &Json, prefix: &str, out: &mut Vec<Json>) {
             "description": node.get("description").cloned().unwrap_or(Json::Null),
             "tags": node.get("tags").cloned().unwrap_or(json!([])),
         }));
+    }
+}
+
+/// Bookmarks, passwords and other entries in a tree (not folders).
+fn count_entries(node: &Json) -> usize {
+    match node {
+        Json::Array(items) => items.iter().map(count_entries).sum(),
+        Json::Object(o) => match o.get("children") {
+            Some(children) => count_entries(children),
+            None => 1,
+        },
+        _ => 0,
     }
 }
 

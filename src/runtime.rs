@@ -34,6 +34,12 @@ impl Runtime for Glib {
         let http = self.http.clone();
         Box::pin(async move {
             let msg = msg?;
+            // A .onion service only through Tor: going direct, its name
+            // would be asked of the system's DNS servers.
+            let host = msg.uri().and_then(|u| u.host()).map(|h| h.to_string()).unwrap_or_default();
+            if crate::browser::is_onion(&host) && !crate::browser::onion_proxied().await {
+                return Err("Tor isn't set as the system's proxy, so a .onion address isn't contacted".into());
+            }
             // Never sent on elsewhere: the core sees a redirect, and refuses it.
             msg.add_flags(soup::MessageFlags::NO_REDIRECT);
             if let Some(body) = body {

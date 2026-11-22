@@ -110,6 +110,25 @@ const LOCAL_HOST_PATTERNS: &[&str] = &[
     r"\[fe[89ab][0-9a-f]:[0-9a-f:.]*\]",
 ];
 
+/// This computer and the local network, as in `LOCAL_HOST_PATTERNS` (not
+/// .onion and .test, which are sites like any other), and 0.0.0.0, which
+/// reaches this computer too.
+const PRIVATE_HOST_PATTERNS: &[&str] = &[
+    r"([^/:@]*\.)?localhost",
+    r"[^/:@]*\.local",
+    r"127\.[0-9.]+",
+    r"0\.0\.0\.0",
+    r"10\.[0-9.]+",
+    r"192\.168\.[0-9.]+",
+    r"169\.254\.[0-9.]+",
+    r"172\.1[6-9]\.[0-9.]+",
+    r"172\.2[0-9]\.[0-9.]+",
+    r"172\.3[01]\.[0-9.]+",
+    r"\[::1?\]",
+    r"\[f[cd][0-9a-f][0-9a-f]:[0-9a-f:.]*\]",
+    r"\[fe[89ab][0-9a-f]:[0-9a-f:.]*\]",
+];
+
 /// A content filter that turns http:// into https:// for pages, frames and
 /// everything they load (pictures, scripts, requests from scripts, ...)
 /// inside the web process, before anything is sent. The upgrade done when a
@@ -163,6 +182,18 @@ pub fn own_filter(https_only: bool, allowed: &[String], block_onion: bool) -> St
     if block_onion {
         rules.push(serde_json::json!({
             "trigger": { "url-filter": ONION },
+            "action": { "type": "block" },
+        }));
+    }
+    // Pages on the internet can't reach this computer or the local network
+    // (a site finding out which apps you run, or linking your visit to an
+    // app's account, as Meta and Yandex did through localhost). A page
+    // that's itself local can, and so can the address bar.
+    let any_scheme = "^[a-z][a-z0-9+.-]*://([^/@]*@)?";
+    let local: Vec<String> = PRIVATE_HOST_PATTERNS.iter().map(|h| format!("{any_scheme}{h}{HOST_END}")).collect();
+    for pattern in &local {
+        rules.push(serde_json::json!({
+            "trigger": { "url-filter": pattern, "unless-top-url": local },
             "action": { "type": "block" },
         }));
     }
@@ -354,6 +385,30 @@ mod tests {
             assert_eq!(last["action"]["type"], "block");
             assert_eq!(last["trigger"]["resource-type"], serde_json::json!(["ping"]));
             assert_eq!(rules.iter().any(|r| r["action"]["type"] == "make-https"), https_only);
+        }
+    }
+
+    #[test]
+    fn the_internet_cant_reach_this_computer() {
+        let rules: Vec<serde_json::Value> = serde_json::from_str(&own_filter(true, &[], false)).unwrap();
+        let blocks: Vec<&serde_json::Value> = rules.iter().filter(|r| r["trigger"]["unless-top-url"].is_array()).collect();
+        let hit = |url: &str| blocks.iter().any(|r| regex::Regex::new(r["trigger"]["url-filter"].as_str().unwrap()).unwrap().is_match(url));
+        let top_local = |url: &str| {
+            blocks[0]["trigger"]["unless-top-url"].as_array().unwrap().iter().any(|p| regex::Regex::new(p.as_str().unwrap()).unwrap().is_match(url))
+        };
+        for url in ["http://localhost:8080/x", "ws://127.0.0.1:9222/", "http://192.168.1.1/", "http://0.0.0.0:631/", "http://[::1]:80/",
+                    "https://printer.local/", "http://172.20.0.1/", "http://a.localhost/"] {
+            assert!(hit(url), "{url}");
+            assert!(top_local(url), "{url}");
+        }
+        for url in ["https://example.com/", "http://127.0.0.1.example.com/", "http://u:127.0.0.1@example.com/", "http://abc.onion/",
+                    "https://172.32.0.1/", "https://localhost.example.com/"] {
+            assert!(!hit(url), "{url}");
+            assert!(!top_local(url), "{url}");
+        }
+        // No "or" in WebKit's patterns.
+        for r in &blocks {
+            assert!(!r["trigger"]["url-filter"].as_str().unwrap().contains('|'));
         }
     }
 

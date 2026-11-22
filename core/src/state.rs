@@ -127,9 +127,14 @@ impl Store {
         *self.history.borrow_mut() = None;
     }
 
+    /// Overwritten, then deleted; and the data key is renewed, so a copy
+    /// of the old file left anywhere can't be opened with the key in use.
     pub fn clear_history(&self) {
         *self.history.borrow_mut() = Some(Vec::new());
-        let _ = fs::remove_file(history_path());
+        vault::wipe(&history_path());
+        if let Err(e) = vault::get().renew_data_key() {
+            eprintln!("wisp: history cleared, but the key it was sealed with stays: {e}");
+        }
     }
 
     fn save_soon(self: &Rc<Self>) {

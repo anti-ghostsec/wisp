@@ -28,9 +28,11 @@
   };
 
   const nav = Navigator.prototype;
-  define(nav, "hardwareConcurrency", 4);
-  define(nav, "deviceMemory", 8);
-  define(nav, "maxTouchPoints", 0);
+  // Only what this engine already has: an API WebKit lacks (such as
+  // Chrome's deviceMemory) would mark the page's visitor as a Wisp user.
+  if ("hardwareConcurrency" in nav) define(nav, "hardwareConcurrency", 4);
+  if ("deviceMemory" in nav) define(nav, "deviceMemory", 8);
+  if ("maxTouchPoints" in nav) define(nav, "maxTouchPoints", 0);
   // No Do Not Track or Global Privacy Control here: saying so without
   // the headers that go with them would only make Wisp stand out.
   if ("getBattery" in nav) define(nav, "getBattery", undefined);

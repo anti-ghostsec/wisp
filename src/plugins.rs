@@ -92,6 +92,8 @@ pub struct PluginHost {
     backgrounds: RefCell<HashMap<String, WebView>>,
     /// Running native helpers, by plugin id.
     natives: RefCell<HashMap<String, Rc<NativePort>>>,
+    /// Filter lists not in force (never downloaded), by plugin id.
+    missing_lists: RefCell<HashMap<String, Vec<(String, String)>>>,
     /// Plugins whose helper the user is being asked about, or turned down
     /// this run.
     native_asking: RefCell<std::collections::HashSet<String>>,
@@ -294,6 +296,7 @@ impl PluginHost {
             network: session.clone(),
             backgrounds: RefCell::new(HashMap::new()),
             natives: RefCell::new(HashMap::new()),
+            missing_lists: RefCell::default(),
             native_asking: RefCell::default(),
             native_denied: RefCell::default(),
             shadowed,
@@ -805,6 +808,20 @@ impl PluginHost {
         if !stale {
             return;
         }
+        // After a failed download, not again on every start: an hour, then
+        // two, four, ... up to the list's refresh time.
+        let failed_path = dir.join(format!("{base}.failed"));
+        let failures: u32 = fs::read_to_string(&failed_path).ok().and_then(|t| t.trim().parse().ok()).unwrap_or(0);
+        let since_failure = fs::metadata(&failed_path).and_then(|m| m.modified()).ok().and_then(|t| SystemTime::now().duration_since(t).ok());
+        if let Some(since) = since_failure {
+            let wait = Duration::from_secs(3600 << failures.min(10)).min(Duration::from_secs(list.refresh_days.max(1) * 86_400));
+            if since < wait {
+                if guard.is_some() {
+                    self.note_missing_list(p, &list.name, "its last download failed; Wisp tries again later");
+                }
+                return;
+            }
+        }
         if cached.is_some() {
             // Don't compete with page loads right after startup.
             glib::timeout_future_seconds(30).await;
@@ -825,11 +842,41 @@ impl PluginHost {
                         "wisp: {}: {} rules active ({} unsupported skipped)",
                         list.name, converted.rules, converted.skipped
                     );
+                    let _ = fs::remove_file(&failed_path);
+                    self.note_missing_list(p, &list.name, "");
                 }
             }
-            Err(e) => eprintln!("wisp: cannot download {}: {e}", list.name),
+            Err(e) => {
+                eprintln!("wisp: cannot download {}: {e}", list.name);
+                let _ = fs::create_dir_all(&dir);
+                let _ = fs::write(&failed_path, (failures + 1).to_string());
+                if guard.is_some() {
+                    self.note_missing_list(p, &list.name, &format!("it couldn't be downloaded ({e})"));
+                }
+            }
         }
         drop(guard);
+    }
+
+    /// Remember that `list` isn't in force (or, with no `why`, that it is
+    /// now), for the plugin's row in ☰ → Plugins.
+    fn note_missing_list(&self, p: &Plugin, list: &str, why: &str) {
+        {
+            let mut missing = self.missing_lists.borrow_mut();
+            let entry = missing.entry(p.manifest.id.clone()).or_default();
+            entry.retain(|(name, _)| name != list);
+            if !why.is_empty() {
+                entry.push((list.to_string(), why.to_string()));
+            }
+        }
+        if let Some(ui) = self.ui.borrow().clone() {
+            ui.plugins_changed();
+        }
+    }
+
+    /// The plugin's filter lists that aren't in force, and why.
+    pub fn missing_lists(&self, id: &str) -> Vec<(String, String)> {
+        self.missing_lists.borrow().get(id).cloned().unwrap_or_default()
     }
 
     /// A filter list, if it's no bigger than `MAX_LIST_BYTES`: read a piece
@@ -972,7 +1019,16 @@ impl PluginHost {
             }
             ("native", "post") => {
                 need("native")?;
-                self.native_port(p).await?.post(&args["message"])?;
+                let port = self.native_port(p).await?;
+                // The helper goes online only the way this address's pages
+                // do (see `native_route`).
+                let mut message = args["message"].clone();
+                if let Some(fields) = message.as_object_mut() {
+                    let url = fields.get("url").and_then(Json::as_str).filter(|u| u.starts_with("https://") || u.starts_with("http://"));
+                    let route = native_route(url.unwrap_or("https://github.com/")).await;
+                    fields.insert("route".into(), Json::String(route));
+                }
+                port.post(&message)?;
                 Ok(Json::Null)
             }
             ("native", "close") => {
@@ -1058,6 +1114,38 @@ impl PluginHost {
 }
 
 /// `wisp._emit(kind, data)` in a view, in the plugin's world.
+/// How Wisp's pages reach `url`, for a native helper to go the same way:
+/// "direct", a proxy ("socks5h://host:port", "http://host:port"), or
+/// "blocked" when it can't be told (the helper then goes nowhere rather
+/// than straight from this computer's address).
+async fn native_route(url: &str) -> String {
+    match gio::ProxyResolver::default().lookup_future(url).await {
+        Ok(proxies) => proxies.first().map(|p| route_from_proxy(p)).unwrap_or_else(|| "blocked".into()),
+        Err(_) => "blocked".into(),
+    }
+}
+
+/// A proxy as GIO names it, as a route a helper can use exactly: SOCKS
+/// always with names looked up by the proxy (socks5h, socks4a).
+fn route_from_proxy(proxy: &str) -> String {
+    if proxy == "direct://" {
+        return "direct".into();
+    }
+    let Some((scheme, rest)) = proxy.split_once("://") else { return "blocked".into() };
+    let scheme = match scheme.to_ascii_lowercase().as_str() {
+        "socks" | "socks5" | "socks5h" => "socks5h",
+        "socks4" | "socks4a" => "socks4a",
+        "http" => "http",
+        "https" => "https",
+        _ => return "blocked".into(),
+    };
+    let rest = rest.trim_end_matches('/');
+    if rest.is_empty() || rest.contains(['/', ' ', '?', '#']) {
+        return "blocked".into();
+    }
+    format!("{scheme}://{rest}")
+}
+
 fn emit(view: &WebView, p: &Plugin, kind: &str, data: &Json) {
     let js = format!("globalThis.wisp && wisp._emit({}, {data});", Json::from(kind));
     view.evaluate_javascript(&js, Some(&p.world()), None, None::<&gio::Cancellable>, |_| {});
@@ -1079,4 +1167,21 @@ fn netscape_cookies(cookies: &mut [soup::Cookie]) -> String {
         ));
     }
     out
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::route_from_proxy;
+
+    #[test]
+    fn helpers_go_the_way_pages_go() {
+        assert_eq!(route_from_proxy("direct://"), "direct");
+        assert_eq!(route_from_proxy("socks://127.0.0.1:9050"), "socks5h://127.0.0.1:9050");
+        assert_eq!(route_from_proxy("socks5://127.0.0.1:9050/"), "socks5h://127.0.0.1:9050");
+        assert_eq!(route_from_proxy("socks4://127.0.0.1:9050"), "socks4a://127.0.0.1:9050");
+        assert_eq!(route_from_proxy("http://127.0.0.1:7890/"), "http://127.0.0.1:7890");
+        for bad in ["", "ftp://x:1", "http://", "http://x:1/a", "nonsense"] {
+            assert_eq!(route_from_proxy(bad), "blocked", "{bad}");
+        }
+    }
 }

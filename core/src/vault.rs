@@ -465,6 +465,26 @@ impl Vault {
         Ok(())
     }
 
+    /// A new data key, and everything kept sealed again with it, keeping the
+    /// password: what was deleted before (cleared history, older copies of
+    /// files the disk may still hold) can't be opened with the key Wisp
+    /// holds from now on. Only while unlocked.
+    pub fn renew_data_key(&self) -> Result<(), String> {
+        let (mut secrets, kek) = self.open.borrow().as_ref().map(|(s, k)| (s.clone(), k.clone())).ok_or(LOCKED)?;
+        let mut header = self.sealed.borrow().clone().ok_or(LOCKED)?;
+        if secrets.previous_key.is_none() {
+            secrets.previous_key = Some(secrets.key.clone());
+        }
+        secrets.key = B64.encode(random_key()?.0);
+        header.secrets = seal(&kek, &secrets)?;
+        write_private(&vault_path(), &serde_json::to_string_pretty(&header).map_err(|e| e.to_string())?)
+            .map_err(|e| format!("couldn't save the vault: {e}"))?;
+        *self.sealed.borrow_mut() = Some(header);
+        *self.open.borrow_mut() = Some((secrets, kek));
+        self.rekey();
+        Ok(())
+    }
+
     /// Seal `text` with the data key for the file at `path`, and write it
     /// there (as `{"sealed": ...}` when `wrapped`). The file's name and a
     /// new version are bound to it, so it can't be passed off as another
@@ -817,6 +837,19 @@ mod tests {
         // An older copy put back is refused.
         fs::write(&history, stale).unwrap();
         assert!(vault.read_sealed(&history, false).is_none());
+
+        // A new data key alone (history cleared): what's kept still reads,
+        // with the new key only, and the vault file opens with it.
+        let old_local = fs::read_to_string(&local).unwrap();
+        vault.renew_data_key().unwrap();
+        let renewed = vault.data_key().unwrap();
+        assert_ne!(renewed, after);
+        assert!(vault.open.borrow().as_ref().unwrap().0.previous_key.is_none());
+        assert_eq!(vault.read_sealed(&local, true).unwrap(), "{\"t\":1}");
+        let blob = fs::read_to_string(&local).unwrap();
+        assert_ne!(blob, old_local);
+        let reopened = Vault::load();
+        assert_eq!(reopened.data_key(), Some(renewed));
         let _ = fs::remove_dir_all(&root);
     }
 
