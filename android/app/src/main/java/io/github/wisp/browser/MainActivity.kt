@@ -55,6 +55,7 @@ import java.util.concurrent.Executors
 
 private const val PICK_FILES = 1
 private const val RELOCK_AFTER_MS = 5 * 60_000L
+private const val OLD_AFTER_DAYS = 60
 /** A new tab to type an address or search into (a search with nothing typed yet). */
 private const val TYPE = "wisp:type"
 /** Sites allowed pop-ups, until Wisp closes. */
@@ -75,7 +76,7 @@ class MainActivity : Activity(), Plugins.Ui {
     /** Links handed to Wisp before it was ready. */
     private val waiting = mutableListOf<String>()
 
-    private val prefs get() = getSharedPreferences(Engine.PREFS, Context.MODE_PRIVATE)
+    private val prefs get() = Engine.prefs(this)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -84,6 +85,8 @@ class MainActivity : Activity(), Plugins.Ui {
         applyScreenPrivacy()
         buildUi()
         Engine.start(this)
+        // What a Wisp that was killed while on Tor left of Tor's files in the clear.
+        if (Engine.route(this) != Engine.Route.TOR) Tor.sealIdle(this)
         Plugins.ui = this
         Tabs.delegates = { tab, session -> connect(tab, session) }
         intent?.let { linkOf(it) }?.let { waiting += it }
@@ -106,7 +109,60 @@ class MainActivity : Activity(), Plugins.Ui {
             waiting.clear()
             if (Tabs.list.isEmpty()) openTab(home(), true) else show(Tabs.current ?: Tabs.list.last())
             startSuspendTimer()
+            warnIfOld()
         }
+    }
+
+    /** ☰ → More → Check for updates: now, along the route (over Tor when on Tor). */
+    private fun checkUpdates() {
+        if (Engine.route(this) == Engine.Route.TOR && !Tor.ready) {
+            Toast.makeText(this, "Tor isn't connected yet: check again once it is", Toast.LENGTH_LONG).show()
+            return
+        }
+        Toast.makeText(this, "Checking for updates…", Toast.LENGTH_SHORT).show()
+        Updates.check(this) { release, error ->
+            when {
+                release != null -> offerUpdate(release)
+                error != null -> Toast.makeText(this, "Couldn't check: $error", Toast.LENGTH_LONG).show()
+                else -> Toast.makeText(this, "This Wisp is the newest", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun offerUpdate(release: Updates.Release) {
+        SecureDialog(this)
+            .setTitle("A newer Wisp is out")
+            .setMessage("${release.tag} is out. Download it (about 100 MB${if (Engine.route(this) == Engine.Route.TOR) ", over Tor" else ""}) and install it? It's installed only if it's signed with Wisp's key, and Android asks you first. Your data stays.")
+            .setPositiveButton("Download") { _, _ ->
+                showNotice("Downloading the update…")
+                Updates.install(this, release, { text -> showNotice(text) }) { error ->
+                    notice.visibility = View.GONE
+                    if (error != null) Toast.makeText(this, "Update: $error", Toast.LENGTH_LONG).show()
+                }
+            }
+            .setNegativeButton("Not now", null)
+            .show()
+    }
+
+    /**
+     * Say so when Wisp's browser engine (GeckoView, which gets security
+     * fixes every few weeks) is more than 60 days old, at most once a week,
+     * on any route: the weekly update check runs only on Tor.
+     */
+    private fun warnIfOld() {
+        val built = runCatching {
+            java.text.SimpleDateFormat("yyyyMMddHHmmss", java.util.Locale.ROOT).apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
+                .parse(org.mozilla.geckoview.BuildConfig.MOZ_APP_BUILDID)!!.time
+        }.getOrNull() ?: return
+        val now = System.currentTimeMillis()
+        val days = (now - built) / 86_400_000L
+        if (days < OLD_AFTER_DAYS || now - prefs.getLong("old_warned", 0) < 7 * 86_400_000L) return
+        prefs.edit().putLong("old_warned", now).apply()
+        SecureDialog(this)
+            .setTitle("This Wisp is out of date")
+            .setMessage("Its browser engine (GeckoView ${org.mozilla.geckoview.BuildConfig.MOZ_APP_VERSION}) is $days days old and may lack fixes for security holes that sites can use. Get the newest one: ☰ → More → Check for updates.")
+            .setPositiveButton("OK", null)
+            .show()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -151,8 +207,26 @@ class MainActivity : Activity(), Plugins.Ui {
         val away = hiddenAt.takeIf { it > 0 }?.let { System.currentTimeMillis() - it } ?: 0L
         hiddenAt = 0L
         // A Wisp password locks again after five minutes away.
-        if (ready && away > RELOCK_AFTER_MS && runCatching { Engine.core.vaultLock() }.getOrDefault(false)) {
-            unlockVault {}
+        if (ready && away > RELOCK_AFTER_MS && runCatching { Engine.core.vaultLock() }.getOrDefault(false)) relock()
+    }
+
+    /**
+     * Locked again: what the vault holds goes out of sight, not just behind
+     * a dialog. Every tab closes (the list was saved to the vault as Wisp
+     * went to the background), the Passwords and Bookmarks pages with
+     * them, and Wisp shows an empty tab. Unlocking brings the tabs back;
+     * "Not now" leaves you browsing without them.
+     */
+    private fun relock() {
+        closeAllTabs()
+        openTab("about:blank", true)
+        unlockVault {
+            if (!runCatching { Engine.core.vaultStatus().unlocked }.getOrDefault(false)) return@unlockVault
+            val saved = runCatching { Engine.core.loadTabs() }.getOrDefault(emptyList())
+            if (saved.isEmpty()) return@unlockVault
+            closeAllTabs()
+            saved.forEach { Tabs.list += Tab(it.url, it.title) }
+            show(Tabs.list.last())
         }
     }
 
@@ -180,7 +254,7 @@ class MainActivity : Activity(), Plugins.Ui {
             setPadding(dp(4), dp(4), dp(4), dp(4))
             setBackgroundColor(Color.rgb(0xc0, 0xc0, 0xc0))
         }
-        address = EditText(this).apply {
+        address = EditText(this).private().apply {
             setSingleLine()
             hint = "Search or address"
             setTextColor(Color.BLACK)
@@ -212,7 +286,13 @@ class MainActivity : Activity(), Plugins.Ui {
         top.addView(bar)
         top.addView(progress, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(3)))
         top.addView(notice)
-        gecko = GeckoView(this)
+        gecko = GeckoView(this).apply {
+            // Android's autofill (a phone maker's password manager, Google's)
+            // never sees what's typed into pages: Wisp keeps its own logins.
+            setAutofillEnabled(false)
+            importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
+        }
+        root.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
         root.addView(top)
         root.addView(gecko, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         // Android draws apps under its bars: keep clear of them and of the keyboard.
@@ -325,7 +405,7 @@ class MainActivity : Activity(), Plugins.Ui {
         }
         list.adapter = adapter
         list.setOnItemClickListener { _, _, position, _ -> show(Tabs.list[position]); dialog.dismiss() }
-        dialog = AlertDialog.Builder(this)
+        dialog = SecureDialog(this)
             .setTitle("Tabs")
             .setView(list)
             .setPositiveButton("New tab") { _, _ -> openTab(home(), true) }
@@ -553,7 +633,7 @@ class MainActivity : Activity(), Plugins.Ui {
             }
         }
         if (items.isEmpty()) return
-        AlertDialog.Builder(this)
+        SecureDialog(this)
             .setTitle(link ?: media ?: tab.title)
             .setItems(items.map { it.first }.toTypedArray()) { _, i -> items[i].second() }
             .show()
@@ -596,7 +676,9 @@ class MainActivity : Activity(), Plugins.Ui {
         val privacy = top.addSubMenu("Privacy & security")
         add(privacy, "Security level: ${levelName(Engine.level(this))}") { showLevel() }
         add(privacy, "Route: ${routeName(Engine.route(this))}") { showRoute() }
+        add(privacy, "Tor bridges: ${bridgesName(Tor.bridges(this))}") { showBridges() }
         add(privacy, "Wisp password") { changePassword() }
+        add(privacy, "Duress password") { askDuress() }
         add(privacy, "Wipe everything…") { askWipe() }
 
         val more = top.addSubMenu("More")
@@ -606,11 +688,9 @@ class MainActivity : Activity(), Plugins.Ui {
         add(more, "Settings") { showSettings() }
         add(more, "Plugins") { showPlugins() }
         add(more, "Sync account…") { showSync() }
+        add(more, "Check for updates") { checkUpdates() }
         add(more, "Close all tabs") {
-            Tabs.list.toList().forEach { it.close() }
-            Tabs.list.clear()
-            Tabs.current = null
-            gecko.releaseSession()
+            closeAllTabs()
             openTab(home(), true)
         }
         popup.setOnMenuItemClickListener { item -> actions[item.itemId]?.let { it(); true } ?: false }
@@ -643,7 +723,7 @@ class MainActivity : Activity(), Plugins.Ui {
                 }
                 val fmt = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
                 val labels = visits.map { "${it.title.ifEmpty { it.url }}\n${fmt.format(Date(it.last * 1000))}" }.toTypedArray()
-                AlertDialog.Builder(this)
+                SecureDialog(this)
                     .setTitle("History")
                     .setItems(labels) { _, i -> openTab(visits[i].url, true) }
                     .setNeutralButton("Clear history") { _, _ -> work.execute { runCatching { Engine.core.clearHistory() } } }
@@ -675,7 +755,7 @@ class MainActivity : Activity(), Plugins.Ui {
         val labels = (settings.map { it.label } + "Allow screenshots of Wisp").toTypedArray()
         val checked = (settings.map { cfg.optBoolean(it.key, it.default) } + prefs.getBoolean("screenshots", false)).toBooleanArray()
         val before = checked.copyOf()
-        AlertDialog.Builder(this)
+        SecureDialog(this)
             .setTitle("Settings")
             .setMultiChoiceItems(labels, checked) { _, i, on -> checked[i] = on }
             .setPositiveButton("Save") { _, _ ->
@@ -734,7 +814,7 @@ class MainActivity : Activity(), Plugins.Ui {
             "Safer\nNo JIT compilers (most browser exploits go through them), no WebAssembly, WebGL, WebRTC or MathML. Heavy sites are slower.",
             "Safest\nAlso no JavaScript at all and only the phone's own fonts. Many sites break.",
         )
-        AlertDialog.Builder(this)
+        SecureDialog(this)
             .setTitle("Security level")
             .setSingleChoiceItems(labels, levels.indexOf(Engine.level(this))) { dialog, i ->
                 Engine.setLevel(this, levels[i])
@@ -759,25 +839,113 @@ class MainActivity : Activity(), Plugins.Ui {
             "Tor (built in)\nEverything goes through Tor, names looked up there too. Slower; nothing loads until it's connected.",
             "Orbot\nThrough the Orbot app's Tor instead, if you run it. Wisp can't tell Orbot from another app listening on its port (9050), so the built-in Tor is safer.",
         )
-        AlertDialog.Builder(this)
+        SecureDialog(this)
             .setTitle("Route")
             .setSingleChoiceItems(labels, routes.indexOf(Engine.route(this))) { dialog, i ->
                 dialog.dismiss()
-                val before = Engine.route(this)
-                if (routes[i] == before) return@setSingleChoiceItems
-                Engine.setRoute(this, routes[i])
-                // Nothing a site kept on one route follows you onto another:
-                // cookies, site storage and caches go, then the route's
-                // settings are in force before the page loads again.
-                Engine.runtime.storageController.clearData(StorageController.ClearFlags.ALL).accept({
-                    startRoute { Tabs.current?.session?.reload() }
-                }, {
-                    startRoute { Tabs.current?.session?.reload() }
-                })
-                Toast.makeText(this, "Cookies and site data cleared for the new route", Toast.LENGTH_SHORT).show()
+                if (routes[i] == Engine.route(this)) return@setSingleChoiceItems
+                SecureDialog(this)
+                    .setTitle("Switch to ${routeName(routes[i])}?")
+                    .setMessage("Every tab closes and cookies and site data are cleared first, so no site you had open sees you arrive by the other route.")
+                    .setPositiveButton("Switch") { _, _ -> switchRoute(routes[i]) }
+                    .setNegativeButton("Cancel", null)
+                    .show()
             }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    private fun bridgesName(kind: Tor.Bridges) = when (kind) {
+        Tor.Bridges.NONE -> "none"
+        Tor.Bridges.OBFS4 -> "obfs4"
+        Tor.Bridges.SNOWFLAKE -> "Snowflake"
+        Tor.Bridges.MEEK -> "meek"
+        Tor.Bridges.CUSTOM -> "your own"
+    }
+
+    /**
+     * Bridges for the built-in Tor, where Tor itself is blocked: the Tor
+     * Project's built-in ones, or lines of your own (from
+     * bridges.torproject.org, its Telegram bot or email address, or a friend).
+     */
+    private fun showBridges() {
+        val kinds = Tor.Bridges.entries
+        val labels = arrayOf(
+            "None\nStraight to the Tor network. Fine where Tor isn't blocked.",
+            "obfs4 (built in)\nLooks like random noise. Works in many places; the built-in bridges are well known and blocked in some.",
+            "Snowflake (built in)\nThrough volunteers' browsers, set up via a CDN. Often works where others are blocked, e.g. China and Iran. Slower.",
+            "meek (built in)\nLooks like visits to a big CDN. Slow, but hard to block.",
+            "Your own bridges\nobfs4, webtunnel, Snowflake or meek lines you got yourself: the hardest to block.",
+        )
+        SecureDialog(this)
+            .setTitle("Tor bridges")
+            .setSingleChoiceItems(labels, kinds.indexOf(Tor.bridges(this))) { dialog, i ->
+                dialog.dismiss()
+                if (kinds[i] == Tor.Bridges.CUSTOM) return@setSingleChoiceItems askCustomBridges()
+                Tor.setBridges(this, kinds[i], Tor.customBridges(this))
+                restartTor()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun askCustomBridges() {
+        val field = EditText(this).private().apply {
+            hint = "obfs4 1.2.3.4:443 FINGERPRINT cert=… iat-mode=0"
+            setText(Tor.customBridges(this@MainActivity))
+            minLines = 3
+            textSize = 13f
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            imeOptions = EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+        }
+        SecureDialog(this)
+            .setTitle("Your own bridges")
+            .setMessage("One bridge line per line. Get some at bridges.torproject.org, from @GetBridgesBot on Telegram, or by emailing bridges@torproject.org.")
+            .setView(form(field))
+            .setPositiveButton("Use") { _, _ ->
+                val text = field.text.toString()
+                if (Tor.parse(text).isEmpty()) {
+                    Toast.makeText(this, "No bridge lines Wisp can use in that", Toast.LENGTH_LONG).show()
+                } else {
+                    Tor.setBridges(this, Tor.Bridges.CUSTOM, text)
+                    restartTor()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** New bridges take effect now when on Tor (and at the next start otherwise). */
+    private fun restartTor() {
+        if (Engine.route(this) != Engine.Route.TOR) {
+            Toast.makeText(this, "Used when the route is Tor", Toast.LENGTH_SHORT).show()
+            return
+        }
+        Tor.stop(this)
+        startRoute()
+    }
+
+    /**
+     * Nothing a site had on one route follows you onto another: every tab's
+     * session is closed (background ones too, so none keeps running with its
+     * cookies), cookies, site storage and caches go, and a new tab opens only
+     * once Gecko has the new route's settings.
+     */
+    private fun switchRoute(route: Engine.Route) {
+        closeAllTabs()
+        Engine.setRoute(this, route)
+        val fresh = { startRoute { if (Tabs.list.isEmpty()) openTab(home(), true) } }
+        Engine.runtime.storageController.clearData(StorageController.ClearFlags.ALL).accept({ fresh() }, { fresh() })
+        Toast.makeText(this, "Tabs closed and site data cleared for the new route", Toast.LENGTH_SHORT).show()
+    }
+
+    /** Close every tab (and its session), leaving none open. */
+    private fun closeAllTabs() {
+        Tabs.list.toList().forEach { it.close() }
+        Tabs.list.clear()
+        Tabs.current = null
+        gecko.releaseSession()
+        updateTabCount()
     }
 
     /**
@@ -791,7 +959,7 @@ class MainActivity : Activity(), Plugins.Ui {
         when (route) {
             Engine.Route.ORBOT -> checkOrbot()
             Engine.Route.TOR -> {
-                if (Tor.port == 0) showNotice("Connecting to Tor… pages load once it's connected")
+                if (!Tor.ready) showNotice(if (Tor.bridges(this) == Tor.Bridges.NONE) "Connecting to Tor… pages load once it's connected" else "Connecting to Tor through bridges… pages load once it's connected")
                 Tor.start(this) { status ->
                     main.post {
                         when (status) {
@@ -799,8 +967,11 @@ class MainActivity : Activity(), Plugins.Ui {
                                 notice.visibility = View.GONE
                                 Toast.makeText(this, "Connected to Tor", Toast.LENGTH_SHORT).show()
                                 Tabs.current?.takeIf { it.progress < 100 || it.url != "about:blank" }?.session?.reload()
+                                // The weekly update check, only ever over Tor.
+                                if (Updates.due(this)) Updates.check(this) { release, _ -> if (release != null) offerUpdate(release) }
                             }
                             org.torproject.jni.TorService.STATUS_STARTING -> {}
+                            Tor.BRIDGES_FAILED -> showNotice("Tor's bridges didn't start, so Tor wasn't started either", "Bridges" to { showBridges() })
                             else -> showNotice("Tor isn't connected: pages won't load until it is", "Try again" to { Tor.stop(this); startRoute() })
                         }
                     }
@@ -817,9 +988,9 @@ class MainActivity : Activity(), Plugins.Ui {
      * sync service stay there.
      */
     private fun askWipe() {
-        AlertDialog.Builder(this)
+        SecureDialog(this)
             .setTitle("Wipe everything?")
-            .setMessage("Every tab, your history, the vault with your saved passwords, bookmarks and sync login, cookies, site data and settings are deleted from this phone, and Wisp closes. This can't be undone. What's on your sync service stays there, and so do the files in ${Environment.DIRECTORY_DOWNLOADS}/${Downloads.FOLDER}: delete those in Downloads first if you want them gone.")
+            .setMessage("Every tab, your history, the vault with your saved passwords, bookmarks and sync login, cookies, site data and settings are deleted from this phone, and Wisp closes. This can't be undone. Your downloads go too, except copies you saved to the phone or shared. What's on your sync service stays there.")
             .setPositiveButton("Wipe") { _, _ ->
                 (getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager).clearApplicationUserData()
             }
@@ -854,7 +1025,7 @@ class MainActivity : Activity(), Plugins.Ui {
         val list = Engine.plugins
         val labels = list.map { it.name }.toTypedArray()
         val checked = list.map { it.enabled }.toBooleanArray()
-        AlertDialog.Builder(this)
+        SecureDialog(this)
             .setTitle("Plugins")
             .setMultiChoiceItems(labels, checked) { _, i, on -> checked[i] = on }
             .setPositiveButton("Save") { _, _ ->
@@ -882,7 +1053,7 @@ class MainActivity : Activity(), Plugins.Ui {
             return unlockVault { showSync() }
         }
         val account = runCatching { Engine.core.syncAccount() }.getOrNull()
-        fun field(hint: String, text: String) = EditText(this).apply {
+        fun field(hint: String, text: String) = EditText(this).private().apply {
             this.hint = hint
             setText(text)
             setSingleLine()
@@ -903,7 +1074,7 @@ class MainActivity : Activity(), Plugins.Ui {
             text = if (account != null) "Connected." else
                 "Not set up: bookmarks and passwords stay on this phone, and no sync service is contacted. \"Create new\" makes an account on the service above; \"Use this account\" connects to yours. Either sends what's kept here, encrypted."
         }
-        val dialog = AlertDialog.Builder(this)
+        val dialog = SecureDialog(this)
             .setTitle("Sync account")
             .setMessage("Bookmarks and passwords are encrypted on this phone and synced with xBrowserSync. Enter the same sync ID and password as on your other devices to share them.")
             .setView(form(service, id, password, show, status))
@@ -1005,9 +1176,9 @@ class MainActivity : Activity(), Plugins.Ui {
     private fun askDownload(response: WebResponse) {
         val name = fileName(response)
         val size = response.headers["Content-Length"]?.toLongOrNull()?.let { " (${android.text.format.Formatter.formatShortFileSize(this, it)})" } ?: ""
-        AlertDialog.Builder(this)
+        SecureDialog(this)
             .setTitle("Download")
-            .setMessage("Save $name$size to ${Environment.DIRECTORY_DOWNLOADS}/${Downloads.FOLDER}?\n\nFrom ${Uri.parse(response.uri).host}")
+            .setMessage("Download $name$size into Wisp?\n\nFrom ${Uri.parse(response.uri).host}")
             .setPositiveButton("Save") { _, _ -> save(response, name) }
             .setNegativeButton("Cancel") { _, _ -> work.execute { runCatching { response.body?.close() } } }
             .show()
@@ -1029,7 +1200,7 @@ class MainActivity : Activity(), Plugins.Ui {
 
     // ---- the vault ----
 
-    private fun passwordField(hint: String) = EditText(this).apply {
+    private fun passwordField(hint: String) = EditText(this).private().apply {
         this.hint = hint
         inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         imeOptions = EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
@@ -1043,7 +1214,7 @@ class MainActivity : Activity(), Plugins.Ui {
 
     /** Slow vault work (Argon2id) off the UI thread, then `done` with its error, if any. */
     private fun vaultWork(what: String, f: () -> Unit, done: (String?) -> Unit) {
-        val wait = AlertDialog.Builder(this).setMessage(what).setCancelable(false).show()
+        val wait = SecureDialog(this).setMessage(what).setCancelable(false).show()
         work.execute {
             val error = runCatching(f).exceptionOrNull()?.let { it.message ?: it.toString() }
             main.post { wait.dismiss(); done(error) }
@@ -1058,7 +1229,7 @@ class MainActivity : Activity(), Plugins.Ui {
     private fun askVault(then: () -> Unit) {
         val status = Engine.core.vaultStatus()
         when {
-            status.downgraded -> AlertDialog.Builder(this)
+            status.downgraded -> SecureDialog(this)
                 .setTitle("Your Wisp password is gone")
                 .setMessage("Wisp's vault had a password and now has none, but Wisp didn't remove it: something else replaced the file. Use it without a password only if you did that yourself.")
                 .setPositiveButton("Use it anyway") { _, _ -> Engine.core.vaultAcceptDowngrade(); then() }
@@ -1074,7 +1245,7 @@ class MainActivity : Activity(), Plugins.Ui {
     private fun setupVault(then: () -> Unit) {
         val one = passwordField("Password")
         val two = passwordField("Password again")
-        AlertDialog.Builder(this)
+        SecureDialog(this)
             .setTitle("Choose a Wisp password")
             .setMessage("It locks your saved logins, bookmarks, history and tabs on this phone. Without one they're still kept, sealed with a key stored beside them.")
             .setView(form(one, two))
@@ -1093,12 +1264,17 @@ class MainActivity : Activity(), Plugins.Ui {
 
     private fun unlockVault(then: () -> Unit) {
         val field = passwordField("Wisp password")
-        AlertDialog.Builder(this)
+        SecureDialog(this)
             .setTitle("Unlock Wisp")
             .setView(form(field))
             .setCancelable(false)
             .setPositiveButton("Unlock") { _, _ ->
-                vaultWork("Unlocking…", { Engine.core.vaultUnlock(field.text.toString()) }) { e ->
+                val typed = field.text.toString()
+                vaultWork("Unlocking…", {
+                    // The duress password: everything goes, and Wisp closes.
+                    if (Duress.isSet(this) && Duress.matches(this, typed)) Duress.wipe(this)
+                    Engine.core.vaultUnlock(typed)
+                }) { e ->
                     if (e != null) {
                         Toast.makeText(this, e, Toast.LENGTH_LONG).show()
                         unlockVault(then)
@@ -1109,12 +1285,59 @@ class MainActivity : Activity(), Plugins.Ui {
             .show()
     }
 
+    /**
+     * A second password that wipes everything when typed where Wisp asks
+     * for its password ([Duress]). Only with a Wisp password: without one,
+     * Wisp never asks.
+     */
+    private fun askDuress() {
+        val status = Engine.core.vaultStatus()
+        if (!status.hasPassword) {
+            Toast.makeText(this, "Choose a Wisp password first: Wisp asks for it, and the duress password goes in its place", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (!status.unlocked) return unlockVault {}
+        val one = passwordField("Duress password")
+        val two = passwordField("Duress password again")
+        SecureDialog(this)
+            .setTitle("Duress password")
+            .setMessage("Typed where Wisp asks for its password, it wipes everything on this phone at once (logins, bookmarks, history, tabs, downloads, cookies, settings) and closes Wisp, which then starts as new. What's on your sync service stays there. Long-pressing Wisp's icon offers \"Wipe Wisp now\" too.")
+            .setView(form(one, two))
+            .setPositiveButton(if (Duress.isSet(this)) "Change" else "Set") { _, _ ->
+                val pw = one.text.toString()
+                when {
+                    pw.isEmpty() -> Toast.makeText(this, "Type a password", Toast.LENGTH_LONG).show()
+                    pw != two.text.toString() -> Toast.makeText(this, "The passwords differ", Toast.LENGTH_LONG).show()
+                    else -> {
+                        val wait = SecureDialog(this).setMessage("Setting it…").setCancelable(false).show()
+                        work.execute {
+                            // Never the Wisp password itself, or unlocking would wipe.
+                            val same = runCatching { Engine.core.vaultUnlock(pw) }.isSuccess
+                            if (!same) Duress.set(this, pw)
+                            main.post {
+                                wait.dismiss()
+                                Toast.makeText(this, if (same) "That's your Wisp password: choose another" else "Duress password set", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    }
+                }
+            }
+            .apply {
+                if (Duress.isSet(this@MainActivity)) setNeutralButton("Remove") { _, _ ->
+                    Duress.set(this@MainActivity, null)
+                    Toast.makeText(this@MainActivity, "Duress password removed", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     private fun changePassword() {
         val status = Engine.core.vaultStatus()
         if (!status.unlocked) return unlockVault {}
         val one = passwordField("New password")
         val two = passwordField("New password again")
-        AlertDialog.Builder(this)
+        SecureDialog(this)
             .setTitle("Wisp password")
             .setView(form(one, two))
             .setPositiveButton("Change") { _, _ ->

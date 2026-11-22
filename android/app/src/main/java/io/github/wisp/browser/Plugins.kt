@@ -190,6 +190,8 @@ object Plugins {
      * keyboard's clipboard history and the copy preview leave it out, and
      * cleared after 45 seconds if it's still there.
      */
+    private var copies = 0
+
     private fun copy(context: Context, text: String, secret: Boolean) {
         val clipboard = context.getSystemService(ClipboardManager::class.java)
         val clip = ClipData.newPlainText("Wisp", text)
@@ -200,13 +202,16 @@ object Plugins {
             }
         }
         clipboard.setPrimaryClip(clip)
+        val copy = ++copies
         if (secret) {
+            // Cleared whatever is there by then: in the background Android
+            // doesn't let Wisp read the clipboard to check, so it can't tell
+            // its password from something copied since. Only a newer copy
+            // from Wisp itself is left alone.
             main.postDelayed({
-                val now = clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString()
-                if (now == text) {
-                    if (Build.VERSION.SDK_INT >= 28) clipboard.clearPrimaryClip()
-                    else clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
-                }
+                if (copy != copies) return@postDelayed
+                if (Build.VERSION.SDK_INT >= 28) clipboard.clearPrimaryClip()
+                else clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
             }, 45_000)
         }
     }

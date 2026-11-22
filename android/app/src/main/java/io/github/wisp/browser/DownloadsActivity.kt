@@ -38,7 +38,7 @@ class DownloadsActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (!getSharedPreferences(Engine.PREFS, Context.MODE_PRIVATE).getBoolean("screenshots", false)) {
+        if (!Engine.prefs(this).getBoolean("screenshots", false)) {
             window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         }
         title = "Downloads"
@@ -50,7 +50,7 @@ class DownloadsActivity : Activity() {
             setPadding(dp(16), dp(16), dp(16), dp(4))
         })
         root.addView(TextView(this).apply {
-            text = "Saved in ${Environment.DIRECTORY_DOWNLOADS}/${Downloads.FOLDER}, where your file manager and other apps can see them."
+            text = "Kept inside Wisp, where other apps can't see them, and deleted by Wipe everything. Open or share one, or save it to the phone to keep it outside Wisp."
             setTextColor(Color.DKGRAY)
             setPadding(dp(16), 0, dp(16), dp(8))
         })
@@ -149,7 +149,7 @@ class DownloadsActivity : Activity() {
         box.addView(label(file.name, 16f, Color.BLACK))
         val date = DateFormat.getMediumDateFormat(this).format(Date(file.modified))
         box.addView(label("${Formatter.formatShortFileSize(this, file.size)} · $date", 13f, Color.DKGRAY))
-        box.addView(buttons("Open" to { open(file) }, "Share" to { share(file) }, "Delete" to { askDelete(file) }))
+        box.addView(buttons("Open" to { open(file) }, "Share" to { share(file) }, "Save…" to { export(file) }, "Delete" to { askDelete(file) }))
     }
 
     private fun open(file: Downloads.File) {
@@ -161,6 +161,31 @@ class DownloadsActivity : Activity() {
         }
     }
 
+    /** The file waiting for a place to be saved (Android's file picker answers in onActivityResult). */
+    private var exporting: Downloads.File? = null
+
+    /** Save a copy outside Wisp, wherever you pick in Android's file picker. */
+    private fun export(file: Downloads.File) {
+        exporting = file
+        val pick = Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType(file.mime)
+            .putExtra(Intent.EXTRA_TITLE, file.name)
+        try {
+            startActivityForResult(pick, EXPORT)
+        } catch (e: ActivityNotFoundException) {
+            Toast.makeText(this, "This phone has no file picker to save with", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    @Deprecated("Activity's own; Wisp has no AndroidX activity")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        val file = exporting ?: return
+        exporting = null
+        val to = data?.data
+        if (requestCode != EXPORT || resultCode != RESULT_OK || to == null) return
+        Downloads.export(this, file, to) { e -> Toast.makeText(this, e?.let { "Saving failed: $it" } ?: "Saved", Toast.LENGTH_SHORT).show() }
+    }
+
     private fun share(file: Downloads.File) {
         val send = Intent(Intent.ACTION_SEND).setType(file.mime).putExtra(Intent.EXTRA_STREAM, file.uri)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -168,11 +193,15 @@ class DownloadsActivity : Activity() {
     }
 
     private fun askDelete(file: Downloads.File) {
-        AlertDialog.Builder(this)
+        SecureDialog(this)
             .setTitle("Delete ${file.name}?")
-            .setMessage("It's deleted from ${Environment.DIRECTORY_DOWNLOADS}/${Downloads.FOLDER} on this phone.")
+            .setMessage("It's deleted from Wisp. Copies you saved to the phone or shared stay where they are.")
             .setPositiveButton("Delete") { _, _ -> Downloads.delete(this, file) }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    private companion object {
+        const val EXPORT = 1
     }
 }

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="wipe_short">Wipe Wisp now</string>
+    <string name="wipe_long">Wipe everything in Wisp now</string>
+</resources>

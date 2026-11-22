@@ -200,6 +200,9 @@ jobs:
           got=$("$tools/apksigner" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
           [ "$got" = "$(cat android/release-cert.sha256)" ] || { echo "signed with $got, not Wisp's key" >&2; exit 1; }
           sha256sum "$APK" >"$APK.sha256"
+          # Its version code, which Wisp's update check compares with its own.
+          "$tools/aapt2" dump badging "$APK" | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" | head -n 1 >"$APK.version"
+          grep -qE '^[0-9]+$' "$APK.version" || { echo "no version code in $APK" >&2; exit 1; }
 
       - name: Publish
         env:
@@ -207,4 +210,4 @@ jobs:
           APK: ${{ matrix.apk }}
         run: |
           short=$(echo "$GITHUB_SHA" | cut -c1-7)
-          gh release upload "build-$short" "$APK" "$APK.sha256"
+          gh release upload "build-$short" "$APK" "$APK.sha256" "$APK.version"

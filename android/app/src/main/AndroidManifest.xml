@@ -3,6 +3,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- A download's progress shows in a notification. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Installing an update it downloaded (Android asks you first). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- Only to see whether Orbot is installed, to start it. -->
     <queries>
         <package android:name="org.torproject.android" />
@@ -24,6 +26,8 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Long-press the icon: "Wipe Wisp now". -->
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
             <!-- Searches from other apps and the system ("Search the web"). -->
             <intent-filter>
                 <action android:name="android.intent.action.WEB_SEARCH" />
@@ -43,7 +47,14 @@
             android:exported="false"
             android:label="Downloads"
             android:theme="@android:style/Theme.Material.Light.NoActionBar" />
-        <!-- Sharing downloads on Android 8 and 9, where they're kept in Wisp's own folder. -->
+        <!-- The "Wipe Wisp now" shortcut; not exported, so no other app can start it. -->
+        <activity
+            android:name=".WipeActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.NoDisplay" />
+        <!-- Opening, sharing and installing (updates) files Wisp keeps. -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.files"

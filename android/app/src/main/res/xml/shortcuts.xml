@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Long-press Wisp's icon: wipe everything without opening it. -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="wipe"
+        android:enabled="true"
+        android:icon="@drawable/icon"
+        android:shortcutShortLabel="@string/wipe_short"
+        android:shortcutLongLabel="@string/wipe_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="io.github.wisp.browser"
+            android:targetClass="io.github.wisp.browser.WipeActivity" />
+    </shortcut>
+</shortcuts>

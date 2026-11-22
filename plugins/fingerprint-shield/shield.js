@@ -3,6 +3,11 @@
 // audio, the time zone, screen size or the user agent. A careful site can
 // still tell it's there.
 (() => {
+  // Gecko (Wisp for Android) has protection of its own, always on, and on
+  // Tor the fingerprinting resistance Tor Browser uses: values every Tor
+  // user shares. Changing them here (touch points, device memory, canvas
+  // noise) would only mark Wisp's users, so the shield stays out of it.
+  if (typeof window.mozInnerScreenX === "number" || CSS.supports("-moz-user-focus", "normal")) return;
   // What we replace still reads as native code to the page.
   const natives = new WeakMap();
   const fnToString = Function.prototype.toString;

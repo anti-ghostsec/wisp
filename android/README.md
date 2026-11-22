@@ -87,39 +87,71 @@ security fixes reach Wisp, so move to each one.
     tor-android, the tor Orbot runs). Everything (pages, the sync service)
     goes through it, host names looked up through Tor too. Until it's
     connected Gecko is pointed at a port nothing listens on: nothing loads,
-    and nothing ever goes around it. Its SOCKS port is the one it reports
-    once it's up, never a set one another app could be listening on, and
-    the route's settings are in place before any page or plugin loads.
+    and nothing ever goes around it. Tor listens on a Unix socket in Wisp's
+    own folder, not a port: other apps on the phone can't use it (or see
+    what goes through it), and the route's settings are in place before any
+    page or plugin loads.
     All sites share Tor's circuits: GeckoView has no way to give each site
     its own, as Tor Browser does (their cookies and storage are still kept
     apart).
   - *Orbot*: through the Orbot app's SOCKS port (9050) instead, the same
     way. Any app can listen on that port, and Wisp can't tell Orbot from
     another one, so the built-in Tor is the safer choice.
-  - Changing the route clears cookies, site storage and caches first, so a
-    site can't follow you from one route to the other, and pages load again
-    only once Gecko has the new route's settings. On Tor (built in or
-    Orbot) Gecko's *resist fingerprinting* is on too.
+  - **Bridges** (☰ → Privacy & security → *Tor bridges*), where Tor itself
+    is blocked: the Tor Project's built-in obfs4, Snowflake or meek bridges,
+    or bridge lines of your own (obfs4, webtunnel, Snowflake, meek), through
+    the same pluggable transports Orbot uses (IPtProxy). If the bridges'
+    transport doesn't start, Tor isn't started either.
+  - Changing the route asks first, then closes every tab (background ones
+    too) and clears cookies, site storage and caches, so no site you had
+    open sees you arrive by the other route; a new tab opens only once
+    Gecko has the new route's settings. On Tor (built in or Orbot) Gecko's
+    *resist fingerprinting* is on too, pages are asked for in US English,
+    and the Fingerprint Shield plugin leaves Gecko's values alone.
+- **Local addresses**: web pages can't reach this phone's own servers
+  (localhost) or the local network, which apps use to tie your visits to
+  your accounts in them.
 - **Screen privacy**: no screenshots or screen recordings of Wisp, and a
   blank card in the recent apps (*Allow screenshots of Wisp* in Settings
-  turns it off). With a Wisp password, the vault locks again after five
-  minutes in the background: saved logins, bookmarks, history and plugin
-  data leave memory until you unlock it.
+  turns it off), dialogs included. With a Wisp password, the vault locks
+  again after five minutes in the background: saved logins, bookmarks,
+  history and plugin data leave memory, and every tab closes until you
+  unlock it ("Not now" browses on without them).
+- **Keyboard and autofill**: Wisp's own fields ask the keyboard not to learn
+  what's typed (its incognito mode), and Android's autofill services (a
+  phone maker's password manager among them) see neither them nor pages.
+- **Copied passwords** are marked sensitive and cleared from the clipboard
+  after 45 seconds.
+- **Updates**: once a week while on the built-in Tor, or when you ask (☰ →
+  More → *Check for updates*), Wisp looks at its newest GitHub release the
+  way it loads pages (over Tor on Tor, which also gets past a block on
+  GitHub). An update is installed only if its SHA-256 matches the release's
+  and it's signed with the same key as the Wisp you have; Android asks
+  before installing it. When the browser engine is more than 60 days old,
+  Wisp says so on any route (at most once a week).
+- **Duress password** (☰ → Privacy & security, with a Wisp password): typed
+  where Wisp asks for its password, it wipes everything at once and closes
+  Wisp, which then starts as new. Long-press Wisp's icon for **Wipe Wisp
+  now**, which does the same without opening it.
+- **Sealed settings**: the settings Wisp needs before it's unlocked (the
+  route, Tor's bridges) and Tor's own files (its guards and directory) are
+  encrypted with a key in Android's keystore, which never leaves the phone.
+  Tor's files are in the clear only while Tor runs (and, if Wisp is killed
+  meanwhile, until it next starts).
 - **Wipe everything** (☰): every tab, the history, the vault, cookies, site
-  data and settings are deleted from the phone at once, as Android's "Clear
-  storage" does. What's on the sync service stays there.
+  data, downloads and settings are deleted from the phone at once, as
+  Android's "Clear storage" does. What's on the sync service stays there.
 - **No backups**: nothing of Wisp's goes into Android's cloud backups or
   device transfers.
 
 ## Downloads
 
-Files are saved to **Download/Wisp** on the phone, where your file manager and
-other apps see them (Android 8 and 9 keep them in Wisp's own folder). While
-one downloads, a notification shows its progress (Android 13 and later ask
-once whether Wisp may show notifications); on a locked screen it doesn't name
-the file. ☰ → **Downloads** lists what's downloading, with Cancel, and what's
-finished, to open, share or delete. *Wipe everything* leaves downloaded files
-where they are: delete them in Downloads first.
+Files are kept inside Wisp, where other apps can't see them, and *Wipe
+everything* deletes them. ☰ → **Downloads** lists what's downloading, with
+Cancel, and what's finished, to open, share, save to the phone (**Save…**,
+wherever you pick) or delete; a file leaves Wisp only that way. While one
+downloads, a notification shows its progress, never the file's name (Android
+13 and later ask once whether Wisp may show notifications).
 
 ## The ☰ menu
 

@@ -46,6 +46,8 @@ dependencies {
     implementation("org.mozilla.geckoview:geckoview-$abi:$geckoview")
     // Tor, built in: the Guardian Project's build of tor, the one Orbot runs.
     implementation("info.guardianproject:tor-android:0.4.9.17")
+    // Bridges: obfs4, Snowflake, meek and webtunnel (Lyrebird and Snowflake, as Orbot uses).
+    implementation("com.netzarchitekten:IPtProxy:5.7.0")
     // FileProvider, for sharing downloads on Android 8 and 9 (GeckoView uses it too).
     implementation("androidx.core:core:1.19.1")
     // The Kotlin side of the Rust core's bindings (UniFFI).

@@ -128,7 +128,8 @@ object Engine {
     /** How much of the web Wisp turns off to make attacks harder. */
     enum class Level { STANDARD, SAFER, SAFEST }
 
-    private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    /** Wisp's settings, sealed with a key only this phone holds. */
+    fun prefs(context: Context): android.content.SharedPreferences = SealedPrefs.get(context)
 
     fun route(context: Context): Route {
         val p = prefs(context)
@@ -174,9 +175,15 @@ object Engine {
         val webgl = cfg.optBoolean("webgl", false) && standard
         val socksPort = when (route) {
             Route.ORBOT -> ORBOT_PORT
-            Route.TOR -> Tor.port.takeIf { it > 0 } ?: CLOSED_PORT
+            Route.TOR -> CLOSED_PORT
             Route.DIRECT -> ORBOT_PORT
         }
+        // The built-in Tor listens on a Unix socket only Wisp can open; until
+        // it's connected, Gecko is pointed at a closed port.
+        val socksHost = if (route == Route.TOR && Tor.ready) "file://" + Tor.socket(context).absolutePath else "127.0.0.1"
+        // Over Tor (or with fingerprinting resistance, which Tor turns on)
+        // pages are asked for in US English, as every Tor Browser user's are.
+        val languages = if (tor) "en-US, en" else systemLanguages(context)
         val user = GeckoPreferenceController.PREF_BRANCH_USER
         fun b(name: String, v: Boolean) = SetGeckoPreference.setBoolPref(name, v, user)
         fun i(name: String, v: Int) = SetGeckoPreference.setIntPref(name, v, user)
@@ -219,7 +226,7 @@ object Engine {
             b("network.connectivity-service.enabled", false),
             // Proxy: 1 = the SOCKS settings below, 5 = the system's.
             i("network.proxy.type", if (tor) 1 else 5),
-            s("network.proxy.socks", "127.0.0.1"),
+            s("network.proxy.socks", socksHost),
             i("network.proxy.socks_port", socksPort),
             i("network.proxy.socks_version", 5),
             b("network.proxy.socks_remote_dns", true),
@@ -228,6 +235,16 @@ object Engine {
             // Tor not there: fail, never go around it.
             b("network.proxy.failover_direct", !tor),
             i("network.trr.mode", if (tor) 5 else 0),
+            s("intl.accept_languages", languages),
+            i("privacy.spoof_english", if (tor) 2 else 0),
+            // A web page can't reach this phone's own servers (localhost) or
+            // the local network: apps listening there can tie your visits to
+            // your accounts in them. On Tor, localhost goes to Tor too, which
+            // refuses it.
+            b("network.lna.enabled", true),
+            b("network.lna.blocking", true),
+            b("network.proxy.allow_hijacking_localhost", tor),
+            s("network.proxy.no_proxies_on", ""),
         )
         runtime.settings.setJavaScriptEnabled(javascript(context))
         return GeckoPreferenceController.setGeckoPrefs(prefs).map { result ->
@@ -235,6 +252,14 @@ object Engine {
             if (failed.isNotEmpty()) Log.w(TAG, "prefs not set: $failed")
             result
         }
+    }
+
+    /** The phone's languages, in its order, as Accept-Language lists them. */
+    private fun systemLanguages(context: Context): String {
+        val list = context.resources.configuration.locales
+        val tags = (0 until list.size()).map { list[it].toLanguageTag() }.distinct()
+        return tags.mapIndexed { n, t -> if (n == 0) t else "$t;q=${"%.1f".format(java.util.Locale.ROOT, maxOf(0.1, 1.0 - n * 0.1))}" }
+            .joinToString(", ").ifEmpty { "en-US, en" }
     }
 
     /** What a Gecko pref is now, for checking (null if unset). */
@@ -330,6 +355,18 @@ object Engine {
      * looper) and returns at once; the core always gets an answer, within
      * 30 seconds at the most.
      */
+    /**
+     * A GET through Gecko's network, so along the route (over Tor when on
+     * Tor), with no cookies; redirects are followed. On the UI thread.
+     */
+    fun webGet(url: String): GeckoResult<org.mozilla.geckoview.WebResponse> {
+        val request = WebRequest.Builder(url).apply {
+            header("User-Agent", "wisp")
+            cacheMode(WebRequest.CACHE_MODE_NO_STORE)
+        }.build()
+        return web.fetch(request, GeckoWebExecutor.FETCH_FLAGS_ANONYMOUS or GeckoWebExecutor.FETCH_FLAGS_PRIVATE)
+    }
+
     private fun fetch(id: ULong, method: String, url: String, body: String?) {
         val answered = java.util.concurrent.atomic.AtomicBoolean(false)
         fun done(status: Int, bytes: ByteArray, error: String?) {

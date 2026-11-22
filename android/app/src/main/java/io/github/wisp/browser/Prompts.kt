@@ -12,7 +12,7 @@ import org.mozilla.geckoview.GeckoSession.PromptDelegate.PromptResponse
 
 /** Pages' dialogs: alert, confirm, prompt, <select> menus, sign-in boxes, and held pop-ups. */
 class Prompts(private val activity: MainActivity, private val tab: Tab) : PromptDelegate {
-    private fun dialog(title: String?) = AlertDialog.Builder(activity).setTitle(title?.takeIf { it.isNotEmpty() })
+    private fun dialog(title: String?) = SecureDialog(activity).setTitle(title?.takeIf { it.isNotEmpty() })
 
     override fun onAlertPrompt(session: GeckoSession, prompt: PromptDelegate.AlertPrompt): GeckoResult<PromptResponse> {
         val result = GeckoResult<PromptResponse>()
@@ -35,7 +35,7 @@ class Prompts(private val activity: MainActivity, private val tab: Tab) : Prompt
 
     override fun onTextPrompt(session: GeckoSession, prompt: PromptDelegate.TextPrompt): GeckoResult<PromptResponse> {
         val result = GeckoResult<PromptResponse>()
-        val field = EditText(activity).apply { setText(prompt.defaultValue.orEmpty()) }
+        val field = EditText(activity).private().apply { setText(prompt.defaultValue.orEmpty()) }
         dialog(prompt.title).setMessage(prompt.message).setView(field)
             .setPositiveButton("OK") { _, _ -> result.complete(prompt.confirm(field.text.toString())) }
             .setNegativeButton("Cancel") { _, _ -> result.complete(prompt.dismiss()) }
@@ -46,8 +46,8 @@ class Prompts(private val activity: MainActivity, private val tab: Tab) : Prompt
 
     override fun onAuthPrompt(session: GeckoSession, prompt: PromptDelegate.AuthPrompt): GeckoResult<PromptResponse> {
         val result = GeckoResult<PromptResponse>()
-        val user = EditText(activity).apply { hint = "User name"; setText(prompt.authOptions.username.orEmpty()) }
-        val pass = EditText(activity).apply { hint = "Password"; inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD }
+        val user = EditText(activity).private().apply { hint = "User name"; setText(prompt.authOptions.username.orEmpty()) }
+        val pass = EditText(activity).private().apply { hint = "Password"; inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD }
         val form = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL; setPadding(48, 16, 48, 0); addView(user); addView(pass) }
         dialog(prompt.title ?: "Sign in").setMessage(prompt.message).setView(form)
             .setPositiveButton("Sign in") { _, _ -> result.complete(prompt.confirm(user.text.toString(), pass.text.toString())) }

@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Downloads on Android 8 and 9: Wisp's own Download folder. -->
+<!-- Downloads, and an update for Android's installer: in Wisp's own storage,
+     lent to an app only to open, share or install one. -->
 <paths>
-    <external-files-path name="downloads" path="Download/Wisp/" />
+    <files-path name="downloads" path="downloads/" />
+    <cache-path name="update" path="update/" />
 </paths>
