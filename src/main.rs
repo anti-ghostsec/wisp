@@ -213,9 +213,12 @@ fn configure_rendering(cfg: &config::Config) {
         // and keep ~100 MB of GPU driver out of the UI process.
         vars.push(("GSK_RENDERER", "cairo".into()));
         vars.push(("WEBKIT_SKIA_ENABLE_CPU_RENDERING", "1".into()));
-        // Video decoded by the CPU too: GStreamer otherwise picks the GPU's
+    }
+    if !cfg.gpu_decode {
+        // Video decoded by the CPU: GStreamer otherwise picks the GPU's
         // decoder wherever a VA-API or NVDEC driver is installed, and some
-        // drivers hand back damaged frames (green flashes every few seconds).
+        // drivers hand back damaged frames (green flashes every few seconds)
+        // or stall (streaming sites' videos stopped after a minute).
         let ranks: Vec<String> = HARDWARE_DECODERS.iter().map(|d| format!("{d}:NONE")).collect();
         vars.push(("GST_PLUGIN_FEATURE_RANK", ranks.join(",")));
     }

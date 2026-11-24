@@ -53,6 +53,12 @@ pub struct Config {
     /// (seen with Intel's iris) show some sites' videos black that way,
     /// though the frames are fine. Takes effect when Wisp next starts.
     pub gpu_video: bool,
+    /// Decode video on the graphics card (VA-API, NVDEC). Off: on the CPU,
+    /// as Chrome does on Linux by default. Many drivers' decoders (nouveau
+    /// on NVIDIA cards among them) stall or hand back damaged frames:
+    /// streaming sites' videos stopped after a minute. Takes effect when
+    /// Wisp next starts.
+    pub gpu_decode: bool,
     /// Tabs share one web process where WebKit allows it.
     pub shared_web_process: bool,
     /// Unload background tabs after this many idle minutes (0 = never).
@@ -119,6 +125,7 @@ impl Default for Config {
             gpu_compositing: true,
             hardware_acceleration: false,
             gpu_video: true,
+            gpu_decode: false,
             shared_web_process: true,
             suspend_tabs_after_minutes: 15,
             memory_limit_mb: 768,

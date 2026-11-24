@@ -1768,6 +1768,13 @@ impl BrowserWindow {
             "Untick if videos play black while their sound and controls work: frames then reach the page as plain pictures (a little more CPU). Takes effect when Wisp is next started.",
         ));
         vbox.append(&gpu_video);
+        let gpu_decode = toggle("Decode video on the graphics card", cfg.gpu_decode, |shared, on| {
+            shared.config.borrow_mut().gpu_decode = on;
+        });
+        gpu_decode.set_tooltip_text(Some(
+            "Less work for the CPU, where the graphics driver decodes video well. Some drivers' decoders stall or show damaged frames: if videos stop or flash, untick it. Takes effect when Wisp is next started.",
+        ));
+        vbox.append(&gpu_decode);
         let no_jit = toggle("Safer JavaScript (slower)", cfg.no_jit, |shared, on| {
             shared.config.borrow_mut().no_jit = on;
         });

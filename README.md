@@ -134,8 +134,12 @@ Wisp for Android, on GeckoView with the same Rust core (`core/`), is in
   by default; ☰ → *Draw video on the graphics card*). Some drivers (seen
   with Intel's iris) show some sites' videos black that way though the
   frames are fine: untick it and they arrive as plain pictures, for a
-  little more CPU. Environment variables you set yourself (`GSK_RENDERER`,
-  `WEBKIT_*`) take precedence.
+  little more CPU. Video is decoded by the CPU, as Chrome does on Linux:
+  many drivers' decoders (nouveau on NVIDIA cards among them) stall or show
+  damaged frames. `gpu_decode` (☰ → *Decode video on the graphics card*)
+  hands it to the GPU where the driver does it well. Environment variables
+  you set yourself (`GSK_RENDERER`, `WEBKIT_*`, `GST_PLUGIN_FEATURE_RANK`)
+  take precedence.
 - **Dark browser** (☰ → *Dark browser (pages unchanged)*, `dark_ui`): Wisp's
   own toolbar, tabs and menus in GTK's dark style. Web pages aren't told and
   nothing is inverted, so sites look as they always do (the Dark Mode
