@@ -82,6 +82,14 @@ class MainActivity : Activity(), Plugins.Ui {
     private val prefs get() = Engine.prefs(this)
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Why Wisp closed last time, if it crashed: before anything that
+        // could crash again, so it can be read and copied.
+        CrashNote.install(this)
+        CrashNote.take(this)?.let { note ->
+            super.onCreate(savedInstanceState)
+            CrashNote.show(this, note) { recreate() }
+            return
+        }
         palette = Palette.of(this)
         palette.apply(this)
         super.onCreate(savedInstanceState)
