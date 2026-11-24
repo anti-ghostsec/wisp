@@ -11,11 +11,12 @@
     </queries>
     <application
         android:label="Wisp"
-        android:icon="@drawable/icon"
+        android:icon="@mipmap/icon"
+        android:roundIcon="@mipmap/icon"
         android:allowBackup="false"
         android:dataExtractionRules="@xml/no_backup"
         android:fullBackupContent="false"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        android:theme="@style/Wisp">
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -46,7 +47,7 @@
             android:name=".DownloadsActivity"
             android:exported="false"
             android:label="Downloads"
-            android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+            android:theme="@style/Wisp" />
         <!-- The "Wipe Wisp now" shortcut; not exported, so no other app can start it. -->
         <activity
             android:name=".WipeActivity"

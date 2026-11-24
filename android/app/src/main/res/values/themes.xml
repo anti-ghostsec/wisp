@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Wisp's look before its window is drawn (it then picks light or dark
+     itself: Palette.kt). -->
+<resources>
+    <style name="Wisp" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

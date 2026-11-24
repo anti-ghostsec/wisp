@@ -6,7 +6,6 @@ import android.content.ActivityNotFoundException
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
-import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -68,6 +67,10 @@ class MainActivity : Activity(), Plugins.Ui {
     private lateinit var progress: ProgressBar
     private lateinit var notice: LinearLayout
     private lateinit var top: LinearLayout
+    private lateinit var root: LinearLayout
+    private lateinit var bar: LinearLayout
+    /** Wisp's own colours: light or dark (see [Palette]). */
+    private var palette = Palette(false)
     private val work = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
     private var ready = false
@@ -79,12 +82,18 @@ class MainActivity : Activity(), Plugins.Ui {
     private val prefs get() = Engine.prefs(this)
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        palette = Palette.of(this)
+        palette.apply(this)
         super.onCreate(savedInstanceState)
+        // A picture shared last time (Share image) isn't kept.
+        work.execute { File(cacheDir, "share").deleteRecursively() }
         // Older Wisps kept the sites allowed pop-ups on disk.
         prefs.edit().remove("popups_allowed").apply()
         applyScreenPrivacy()
         buildUi()
         Engine.start(this)
+        // The Dark mode plugin, known once the engine has started.
+        repaint()
         // What a Wisp that was killed while on Tor left of Tor's files in the clear.
         if (Engine.route(this) != Engine.Route.TOR) Tor.sealIdle(this)
         Plugins.ui = this
@@ -246,19 +255,16 @@ class MainActivity : Activity(), Plugins.Ui {
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
 
     private fun buildUi() {
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE) }
+        root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         top = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val bar = LinearLayout(this).apply {
+        bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(4), dp(4), dp(4), dp(4))
-            setBackgroundColor(Color.rgb(0xc0, 0xc0, 0xc0))
         }
         address = EditText(this).private().apply {
             setSingleLine()
             hint = "Search or address"
-            setTextColor(Color.BLACK)
-            setBackgroundColor(Color.WHITE)
             setPadding(dp(8), dp(8), dp(8), dp(8))
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             imeOptions = EditorInfo.IME_ACTION_GO or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
@@ -279,7 +285,6 @@ class MainActivity : Activity(), Plugins.Ui {
         notice = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(Color.rgb(0xff, 0xff, 0xe1))
             setPadding(dp(8), dp(2), dp(4), dp(2))
             visibility = View.GONE
         }
@@ -306,13 +311,41 @@ class MainActivity : Activity(), Plugins.Ui {
             }
             insets
         }
+        paint()
+        // Until the first page draws, its space in the same colour (not a white flash).
+        gecko.coverUntilFirstPaint(palette.background)
         setContentView(root)
+    }
+
+    /** The window in [palette]'s colours. */
+    private fun paint() {
+        root.setBackgroundColor(palette.background)
+        bar.setBackgroundColor(palette.bar)
+        address.setTextColor(palette.text)
+        address.setHintTextColor(palette.faint)
+        address.setBackgroundColor(palette.field)
+        notice.setBackgroundColor(palette.notice)
+        for (i in 0 until notice.childCount) (notice.getChildAt(i) as? TextView)?.takeIf { it !is Button }?.setTextColor(palette.text)
+    }
+
+    /** Light or dark again, if that changed (the phone's dark mode, the Dark mode plugin). */
+    private fun repaint() {
+        val now = Palette.of(this)
+        if (now.dark == palette.dark) return
+        palette = now
+        palette.apply(this)
+        paint()
+    }
+
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        repaint()
     }
 
     /** A bar under the toolbar: a message and buttons; any button closes it. */
     private fun showNotice(text: String, vararg buttons: Pair<String, () -> Unit>) {
         notice.removeAllViews()
-        notice.addView(TextView(this).apply { this.text = text; setTextColor(Color.BLACK) },
+        notice.addView(TextView(this).apply { this.text = text; setTextColor(palette.text) },
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         for ((label, run) in buttons.toList() + ("✕" to {})) {
             notice.addView(Button(this).apply {
@@ -617,6 +650,11 @@ class MainActivity : Activity(), Plugins.Ui {
             items += "Open in new tab" to { openTab(link, false) }
             items += "Copy link" to { copy(link) }
         }
+        val image = media?.takeIf { el.type == ContentDelegate.ContextElement.TYPE_IMAGE }
+        if (image != null) {
+            items += "Save image" to { withImage(tab, image) { response -> save(response, imageName(response)) } }
+            items += "Share image" to { withImage(tab, image) { response -> shareImage(response) } }
+        }
         if (media != null) items += "Open media in new tab" to { openTab(media, false) }
         val contexts = buildSet {
             add("page")
@@ -634,9 +672,106 @@ class MainActivity : Activity(), Plugins.Ui {
         }
         if (items.isEmpty()) return
         SecureDialog(this)
-            .setTitle(link ?: media ?: tab.title)
+            // A data: address is the whole picture: too long for a title.
+            .setTitle(link ?: media?.let { if (it.startsWith("data:")) "Picture" else it } ?: tab.title)
             .setItems(items.map { it.first }.toTypedArray()) { _, i -> items[i].second() }
             .show()
+    }
+
+    /**
+     * The picture at `url`, fetched as the page fetched it (see
+     * [Engine.mediaGet]), or decoded when it's a data: address. A blob: one
+     * lives only inside the page, out of reach from here.
+     */
+    private fun withImage(tab: Tab, url: String, then: (WebResponse) -> Unit) {
+        val fail = { why: String -> Toast.makeText(this, "Couldn't get the picture: $why", Toast.LENGTH_LONG).show() }
+        when {
+            url.startsWith("data:") -> {
+                val head = url.substringAfter("data:").substringBefore(',')
+                val payload = url.substringAfter(',', "")
+                val bytes = runCatching {
+                    if (head.endsWith(";base64")) android.util.Base64.decode(payload, android.util.Base64.DEFAULT)
+                    else Uri.decode(payload).toByteArray()
+                }.getOrNull() ?: return fail("the page's copy of it is damaged")
+                val mime = head.substringBefore(';').ifEmpty { "image/png" }
+                then(
+                    WebResponse.Builder(url).statusCode(200).addHeader("Content-Type", mime)
+                        .addHeader("Content-Length", bytes.size.toString()).body(bytes.inputStream()).build(),
+                )
+            }
+            url.startsWith("https://") || url.startsWith("http://") -> {
+                val private = !Engine.config.optBoolean("persistent_profile", false)
+                Engine.mediaGet(url, tab.url, private).accept({ response ->
+                    when {
+                        response == null -> fail("no answer")
+                        response.statusCode !in 200..299 -> {
+                            work.execute { runCatching { response.body?.close() } }
+                            fail("the site answered ${response.statusCode}")
+                        }
+                        else -> then(response)
+                    }
+                }, { e -> fail(e?.message ?: "the request failed") })
+            }
+            else -> fail("it exists only inside this page")
+        }
+    }
+
+    /** A picture's file name, with the extension its type calls for. */
+    private fun imageName(response: WebResponse): String {
+        val name = if (response.uri.startsWith("data:")) "image" else fileName(response)
+        val mime = response.headers["Content-Type"]?.substringBefore(';')?.trim().orEmpty()
+        val ext = android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(mime) ?: return name
+        val has = name.substringAfterLast('.', "")
+        return if (has.isNotEmpty() && has.length <= 5) name else "$name.$ext"
+    }
+
+    /**
+     * Share a picture with another app (Android's share sheet). It's written
+     * to Wisp's cache, lent to the app picked, and deleted with the next
+     * picture shared or by Wipe.
+     */
+    private fun shareImage(response: WebResponse) {
+        val name = imageName(response)
+        val mime = response.headers["Content-Type"]?.substringBefore(';')?.trim()?.takeIf { it.startsWith("image/") } ?: "image/*"
+        work.execute {
+            val dir = File(cacheDir, "share")
+            val result = runCatching {
+                dir.listFiles()?.forEach { it.delete() }
+                dir.mkdirs()
+                val file = File(dir, name)
+                val input = response.body ?: error("the site sent nothing")
+                input.use { i ->
+                    file.outputStream().use { o ->
+                        val buf = ByteArray(64 * 1024)
+                        var total = 0L
+                        while (true) {
+                            val n = i.read(buf)
+                            if (n < 0) break
+                            total += n
+                            if (total > 64L * 1024 * 1024) error("it's bigger than 64 MB: save it instead")
+                            o.write(buf, 0, n)
+                        }
+                    }
+                }
+                file
+            }
+            main.post {
+                result.onSuccess { file ->
+                    val uri = androidx.core.content.FileProvider.getUriForFile(this, "$packageName.files", file)
+                    val send = Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, uri)
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    send.clipData = android.content.ClipData.newRawUri(name, uri)
+                    try {
+                        startActivity(Intent.createChooser(send, null))
+                    } catch (e: ActivityNotFoundException) {
+                        Toast.makeText(this, "No app takes pictures shared to it", Toast.LENGTH_LONG).show()
+                    }
+                }.onFailure { e ->
+                    dir.listFiles()?.forEach { it.delete() }
+                    Toast.makeText(this, "Couldn't share the picture: ${e.message ?: e}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
     }
 
     private fun copy(text: String) {
@@ -1033,6 +1168,8 @@ class MainActivity : Activity(), Plugins.Ui {
                 if (changed.isEmpty()) return@setPositiveButton
                 for (i in changed.drop(1)) Engine.core.setPluginEnabled(list[i].id, checked[i])
                 Engine.setPluginEnabled(this, list[changed[0]].id, checked[changed[0]]) {
+                    // Wisp itself goes dark (or light) with the Dark mode plugin.
+                    repaint()
                     Toast.makeText(this, "Reload pages to apply", Toast.LENGTH_SHORT).show()
                 }
             }

@@ -4,4 +4,6 @@
 <paths>
     <files-path name="downloads" path="downloads/" />
     <cache-path name="update" path="update/" />
+    <!-- A picture being shared (Share image): replaced by the next one. -->
+    <cache-path name="share" path="share/" />
 </paths>

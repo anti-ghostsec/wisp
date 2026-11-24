@@ -74,7 +74,8 @@ security fixes reach Wisp, so move to each one.
   - *Safest*: also no JavaScript at all, and only the phone's own fonts.
 - **Site isolation** (Gecko's Fission): each site gets content processes of
   its own, so a page that takes over its process still can't read another
-  site's. Content processes run as Android *isolated processes*.
+  site's. They don't run as Android *isolated processes* (a tighter
+  sandbox): in those, Gecko's release builds can't play most video.
 - **Fingerprinting**: Gecko's fingerprinting protection, and the
   `fingerprint-shield` plugin.
 - **Permissions**: location, camera, microphone, notifications: denied.

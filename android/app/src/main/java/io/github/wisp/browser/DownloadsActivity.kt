@@ -5,7 +5,6 @@ import android.app.AlertDialog
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
-import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
@@ -34,29 +33,33 @@ class DownloadsActivity : Activity() {
     private var rows: List<Any> = emptyList()
     private val refresh = { reload() }
 
+    private lateinit var palette: Palette
+
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        palette = Palette.of(this)
+        palette.apply(this)
         super.onCreate(savedInstanceState)
         if (!Engine.prefs(this).getBoolean("screenshots", false)) {
             window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         }
         title = "Downloads"
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE) }
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(palette.background) }
         root.addView(TextView(this).apply {
             text = "Downloads"
             textSize = 22f
-            setTextColor(Color.BLACK)
+            setTextColor(palette.text)
             setPadding(dp(16), dp(16), dp(16), dp(4))
         })
         root.addView(TextView(this).apply {
             text = "Kept inside Wisp, where other apps can't see them, and deleted by Wipe everything. Open or share one, or save it to the phone to keep it outside Wisp."
-            setTextColor(Color.DKGRAY)
+            setTextColor(palette.dim)
             setPadding(dp(16), 0, dp(16), dp(8))
         })
         empty = TextView(this).apply {
             text = "Nothing downloaded yet."
-            setTextColor(Color.GRAY)
+            setTextColor(palette.faint)
             setPadding(dp(16), dp(24), dp(16), dp(16))
             visibility = View.GONE
         }
@@ -124,7 +127,7 @@ class DownloadsActivity : Activity() {
     }
 
     private fun jobRow(box: LinearLayout, job: Downloads.Job) {
-        box.addView(label(job.name, 16f, Color.BLACK))
+        box.addView(label(job.name, 16f, palette.text))
         when (job.state) {
             Downloads.State.RUNNING -> {
                 box.addView(ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
@@ -135,20 +138,20 @@ class DownloadsActivity : Activity() {
                         isIndeterminate = true
                     }
                 })
-                box.addView(label(Downloads.progressText(this, job), 13f, Color.DKGRAY))
+                box.addView(label(Downloads.progressText(this, job), 13f, palette.dim))
                 box.addView(buttons("Cancel" to { job.cancel = true }))
             }
             else -> {
-                box.addView(label("Failed: ${job.error ?: "cancelled"}", 13f, Color.rgb(0xb0, 0, 0)))
+                box.addView(label("Failed: ${job.error ?: "cancelled"}", 13f, palette.error))
                 box.addView(buttons("Remove" to { Downloads.forget(job) }))
             }
         }
     }
 
     private fun fileRow(box: LinearLayout, file: Downloads.File) {
-        box.addView(label(file.name, 16f, Color.BLACK))
+        box.addView(label(file.name, 16f, palette.text))
         val date = DateFormat.getMediumDateFormat(this).format(Date(file.modified))
-        box.addView(label("${Formatter.formatShortFileSize(this, file.size)} · $date", 13f, Color.DKGRAY))
+        box.addView(label("${Formatter.formatShortFileSize(this, file.size)} · $date", 13f, palette.dim))
         box.addView(buttons("Open" to { open(file) }, "Share" to { share(file) }, "Save…" to { export(file) }, "Delete" to { askDelete(file) }))
     }
 

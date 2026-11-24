@@ -93,7 +93,13 @@ object Engine {
             .allowInsecureConnections(if (cfg.optBoolean("https_only", true)) GeckoRuntimeSettings.HTTPS_ONLY else GeckoRuntimeSettings.ALLOW_ALL)
             .preferredColorScheme(if (dark) GeckoRuntimeSettings.COLOR_SCHEME_DARK else GeckoRuntimeSettings.COLOR_SCHEME_SYSTEM)
             .contentBlocking(blocking)
-            .isolatedProcessEnabled(true)
+            // Not as Android isolated processes: there, Android's video
+            // decoders (MediaCodec) can't be reached, so H.264 video (most
+            // streaming sites) has no decoder and the page's process crashes
+            // (Mozilla bugs 1988727, 1988531; Firefox for Android doesn't
+            // ship them either). Turn back on once Gecko's release builds
+            // decode in its media process instead.
+            .isolatedProcessEnabled(false)
             // Site isolation: each site in processes of its own, so a page
             // that takes over its process still can't read another site's.
             .fissionEnabled(true)
@@ -365,6 +371,18 @@ object Engine {
             cacheMode(WebRequest.CACHE_MODE_NO_STORE)
         }.build()
         return web.fetch(request, GeckoWebExecutor.FETCH_FLAGS_ANONYMOUS or GeckoWebExecutor.FETCH_FLAGS_PRIVATE)
+    }
+
+    /**
+     * A picture from a page, for Save image and Share image: through Gecko's
+     * network as the page got it (the route, the page's address as the
+     * referrer, and the tab's cookies: private tabs' only). On the UI thread.
+     */
+    fun mediaGet(url: String, referrer: String, private: Boolean): GeckoResult<org.mozilla.geckoview.WebResponse> {
+        val request = WebRequest.Builder(url).apply {
+            if (referrer.startsWith("https://") || referrer.startsWith("http://")) referrer(referrer)
+        }.build()
+        return web.fetch(request, if (private) GeckoWebExecutor.FETCH_FLAGS_PRIVATE else 0)
     }
 
     private fun fetch(id: ULong, method: String, url: String, body: String?) {
