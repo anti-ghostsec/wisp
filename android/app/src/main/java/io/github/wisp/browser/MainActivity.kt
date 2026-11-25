@@ -113,6 +113,7 @@ class MainActivity : Activity(), Plugins.Ui {
     private fun onReady() {
         if (ready || starting) return
         starting = true
+        applyConsole()
         work.execute { runCatching { Engine.core.syncWarmUp() } }
         // The route's settings (Tor's proxy among them) are in force before
         // the first page loads.
@@ -153,7 +154,7 @@ class MainActivity : Activity(), Plugins.Ui {
             .setPositiveButton("Download") { _, _ ->
                 showNotice("Downloading the update…")
                 Updates.install(this, release, { text -> showNotice(text) }) { error ->
-                    notice.visibility = View.GONE
+                    hideNotice()
                     if (error != null) Toast.makeText(this, "Update: $error", Toast.LENGTH_LONG).show()
                 }
             }
@@ -350,15 +351,37 @@ class MainActivity : Activity(), Plugins.Ui {
         repaint()
     }
 
-    /** A bar under the toolbar: a message and buttons; any button closes it. */
-    private fun showNotice(text: String, vararg buttons: Pair<String, () -> Unit>) {
+    /** What the notice showing does if it goes without an answer. */
+    private var onNoticeGone: () -> Unit = {}
+
+    /** The notice gone, unanswered. */
+    private fun hideNotice() {
+        notice.visibility = View.GONE
+        val gone = onNoticeGone
+        onNoticeGone = {}
+        gone()
+    }
+
+    /**
+     * A bar under the toolbar: a message and buttons; any button closes it.
+     * [dismissed]: what closing it some other way (✕, Back, another notice) means.
+     */
+    private fun showNotice(text: String, vararg buttons: Pair<String, () -> Unit>, dismissed: () -> Unit = {}) {
+        // A question still open when another notice takes its place: closed, as if dismissed.
+        val before = onNoticeGone
+        onNoticeGone = dismissed
+        before()
         notice.removeAllViews()
         notice.addView(TextView(this).apply { this.text = text; setTextColor(palette.text) },
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        for ((label, run) in buttons.toList() + ("✕" to {})) {
+        for ((label, run) in buttons.toList() + ("✕" to dismissed)) {
             notice.addView(Button(this).apply {
                 this.text = label
-                setOnClickListener { notice.visibility = View.GONE; run() }
+                setOnClickListener {
+                    notice.visibility = View.GONE
+                    onNoticeGone = {}
+                    run()
+                }
             })
         }
         notice.visibility = View.VISIBLE
@@ -574,9 +597,16 @@ class MainActivity : Activity(), Plugins.Ui {
             override fun onKill(session: GeckoSession) = tab.suspend()
         }
         session.permissionDelegate = object : PermissionDelegate {
-            // Location, camera, microphone, notifications, ...: denied, as on desktop.
+            // Location, camera, microphone, notifications, ...: denied, as on
+            // desktop. Protected (DRM) video: asked. Muted autoplay: allowed,
+            // as in Firefox (players that start muted, previews); with sound,
+            // a video waits for a tap.
             override fun onContentPermissionRequest(session: GeckoSession, perm: PermissionDelegate.ContentPermission): GeckoResult<Int> =
-                GeckoResult.fromValue(PermissionDelegate.ContentPermission.VALUE_DENY)
+                when (perm.permission) {
+                    PermissionDelegate.PERMISSION_MEDIA_KEY_SYSTEM_ACCESS -> askDrm(perm.uri)
+                    PermissionDelegate.PERMISSION_AUTOPLAY_INAUDIBLE -> GeckoResult.fromValue(PermissionDelegate.ContentPermission.VALUE_ALLOW)
+                    else -> GeckoResult.fromValue(PermissionDelegate.ContentPermission.VALUE_DENY)
+                }
 
             override fun onAndroidPermissionsRequest(session: GeckoSession, permissions: Array<out String>?, callback: PermissionDelegate.Callback) =
                 callback.reject()
@@ -590,6 +620,38 @@ class MainActivity : Activity(), Plugins.Ui {
             ) = callback.reject()
         }
         session.promptDelegate = Prompts(this, tab)
+    }
+
+    /**
+     * Sites let play protected video this run. Kept in memory only, as the
+     * sites allowed pop-ups are: a list on disk would say which sites you use.
+     */
+    private val drmAllowed = HashSet<String>()
+
+    /**
+     * A site asking to play protected (DRM) video: Netflix, Disney+, Prime
+     * Video and most paid streaming won't play without it. Android's
+     * Widevine plays it, which lets the site tell this phone from others,
+     * so it's asked, as Firefox does.
+     */
+    private fun askDrm(uri: String): GeckoResult<Int> {
+        val host = Uri.parse(uri).host ?: uri
+        if (host in drmAllowed) return GeckoResult.fromValue(PermissionDelegate.ContentPermission.VALUE_ALLOW)
+        val answer = GeckoResult<Int>()
+        var answered = false
+        fun reply(allow: Boolean) {
+            if (answered) return
+            answered = true
+            if (allow) drmAllowed += host
+            answer.complete(if (allow) PermissionDelegate.ContentPermission.VALUE_ALLOW else PermissionDelegate.ContentPermission.VALUE_DENY)
+        }
+        showNotice(
+            "$host wants to play protected (DRM) video. Android's Widevine plays it, and it lets the site recognise this phone.",
+            "Allow" to { reply(true) },
+            "Block" to { reply(false) },
+            dismissed = { reply(false) },
+        )
+        return answer
     }
 
     /**
@@ -642,7 +704,7 @@ class MainActivity : Activity(), Plugins.Ui {
         val tab = Tabs.current
         when {
             fullScreen && tab != null -> tab.session.exitFullScreen()
-            notice.visibility == View.VISIBLE -> notice.visibility = View.GONE
+            notice.visibility == View.VISIBLE -> hideNotice()
             tab != null && tab.canGoBack -> tab.session.goBack()
             else -> @Suppress("DEPRECATION") super.onBackPressed()
         }
@@ -829,6 +891,8 @@ class MainActivity : Activity(), Plugins.Ui {
             for (a in p.actions) add(more, a.label) { runAction(p.id, a.id, a.page) }
         }
         add(more, "Settings") { showSettings() }
+        add(more, "Test video playback") { openVideoTest() }
+        if (prefs.getBoolean("page_console", false)) add(more, "Page console") { showConsole() }
         add(more, "Plugins") { showPlugins() }
         add(more, "Sync account…") { showSync() }
         add(more, "Check for updates") { checkUpdates() }
@@ -895,8 +959,8 @@ class MainActivity : Activity(), Plugins.Ui {
 
     private fun showSettings() {
         val cfg = Engine.config
-        val labels = (settings.map { it.label } + "Allow screenshots of Wisp").toTypedArray()
-        val checked = (settings.map { cfg.optBoolean(it.key, it.default) } + prefs.getBoolean("screenshots", false)).toBooleanArray()
+        val labels = (settings.map { it.label } + "Allow screenshots of Wisp" + "Page console (for finding why a site fails)").toTypedArray()
+        val checked = (settings.map { cfg.optBoolean(it.key, it.default) } + prefs.getBoolean("screenshots", false) + prefs.getBoolean("page_console", false)).toBooleanArray()
         val before = checked.copyOf()
         SecureDialog(this)
             .setTitle("Settings")
@@ -904,15 +968,17 @@ class MainActivity : Activity(), Plugins.Ui {
             .setPositiveButton("Save") { _, _ ->
                 val changes = JSONObject()
                 settings.forEachIndexed { i, s -> if (checked[i] != before[i]) changes.put(s.key, checked[i]) }
-                val screenshots = checked.last()
+                val screenshots = checked[settings.size]
+                val console = checked[settings.size + 1]
                 val restart = settings.indices.any { checked[it] != before[it] && settings[it].restart }
                 try {
                     if (changes.length() > 0) Engine.core.setConfig(changes.toString())
                 } catch (e: Exception) {
                     Toast.makeText(this, e.message, Toast.LENGTH_LONG).show()
                 }
-                prefs.edit().putBoolean("screenshots", screenshots).apply()
+                prefs.edit().putBoolean("screenshots", screenshots).putBoolean("page_console", console).apply()
                 applyScreenPrivacy()
+                applyConsole()
                 Engine.reloadConfig()
                 applyLive()
                 if (restart) Toast.makeText(this, "Some changes take effect when Wisp next starts", Toast.LENGTH_LONG).show()
@@ -934,6 +1000,65 @@ class MainActivity : Activity(), Plugins.Ui {
         cb.setQueryParameterStrippingEnabled(cfg.optBoolean("strip_tracking_params", true))
         cb.setQueryParameterStrippingPrivateBrowsingEnabled(cfg.optBoolean("strip_tracking_params", true))
         Engine.applyPrefs(this)
+    }
+
+    // ---- page console and video test ----
+
+    /**
+     * Pages' console messages (errors, media errors) into Android's log,
+     * where Wisp can show them: only while Page console is on, as they
+     * name the pages you visit.
+     */
+    private fun applyConsole() {
+        val debuggable = applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
+        runCatching { Engine.runtime.settings.setConsoleOutputEnabled(debuggable || prefs.getBoolean("page_console", false)) }
+    }
+
+    /** ☰ → More → Page console: the last of what pages (and their video) reported. */
+    private fun showConsole() {
+        work.execute {
+            val text = runCatching {
+                // Wisp's own log only: Android shows an app nothing else.
+                val p = ProcessBuilder("logcat", "-d", "-v", "time", "-t", "3000", "*:W", "GeckoConsole:V")
+                    .redirectErrorStream(true).start()
+                val lines = p.inputStream.bufferedReader().readLines()
+                p.waitFor()
+                lines.filter { l ->
+                    "GeckoConsole" in l || "Gecko" in l || "Media" in l || "media" in l || "Codec" in l || " E/" in l || " F/" in l
+                }.takeLast(400).joinToString("\n")
+            }.getOrElse { "Couldn't read the log: ${it.message}" }
+                .ifEmpty { "Nothing yet: open the site that fails, try to play its video, then come back here." }
+            main.post {
+                val view = TextView(this).apply {
+                    setText(text)
+                    setTextIsSelectable(true)
+                    textSize = 11f
+                    typeface = android.graphics.Typeface.MONOSPACE
+                    val pad = (12 * resources.displayMetrics.density).toInt()
+                    setPadding(pad, pad, pad, pad)
+                }
+                SecureDialog(this)
+                    .setTitle("Page console")
+                    .setView(android.widget.ScrollView(this).apply { addView(view) })
+                    .setPositiveButton("Copy") { _, _ ->
+                        val clip = getSystemService(android.content.ClipboardManager::class.java)
+                        clip?.setPrimaryClip(android.content.ClipData.newPlainText("Wisp page console", text))
+                        Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("Close", null)
+                    .show()
+            }
+        }
+    }
+
+    /** ☰ → More → Test video playback: what this phone's Wisp can play, in a tab of its own. */
+    private fun openVideoTest() {
+        val html = runCatching { assets.open("videotest.html").use { it.readBytes().toString(Charsets.UTF_8) } }.getOrNull() ?: return
+        val tab = Tab("about:blank")
+        val at = Tabs.current?.let { Tabs.list.indexOf(it) + 1 } ?: Tabs.list.size
+        Tabs.list.add(at.coerceIn(0, Tabs.list.size), tab)
+        show(tab)
+        tab.session.load(GeckoSession.Loader().data(html, "text/html"))
     }
 
     // ---- screen privacy, security level, route, wipe ----
@@ -1107,7 +1232,7 @@ class MainActivity : Activity(), Plugins.Ui {
                     main.post {
                         when (status) {
                             org.torproject.jni.TorService.STATUS_ON -> {
-                                notice.visibility = View.GONE
+                                hideNotice()
                                 Toast.makeText(this, "Connected to Tor", Toast.LENGTH_SHORT).show()
                                 Tabs.current?.takeIf { it.progress < 100 || it.url != "about:blank" }?.session?.reload()
                                 // The weekly update check, only ever over Tor.

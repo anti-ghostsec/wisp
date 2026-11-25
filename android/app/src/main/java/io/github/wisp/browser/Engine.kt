@@ -213,6 +213,10 @@ object Engine {
             b("mathml.disabled", !standard),
             // Safest: only the fonts on the phone.
             b("gfx.downloadable_fonts.enabled", level != Level.SAFEST),
+            // Protected (DRM) video through Android's Widevine: only for sites
+            // you allow when asked (MainActivity's askDrm).
+            b("media.eme.enabled", true),
+            b("media.mediadrm-widevinecdm.visible", true),
             b("privacy.fingerprintingProtection", true),
             b("privacy.fingerprintingProtection.pbmode", true),
             // On Tor, look like every other Tor user as far as Gecko can
