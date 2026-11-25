@@ -54,9 +54,12 @@ security fixes reach Wisp, so move to each one.
   on HTTP. Unlike desktop Wisp, `.local` and `.test` names are upgraded too.
 - **Tracking parameters** (`utm_*`, `fbclid`, ...) are taken off addresses
   before they're loaded (wisp-core's list), and Gecko's own query stripping is on.
-- **Cookies and tracking**: third-party cookies blocked; Gecko's strict
-  Enhanced Tracking Protection; Global Privacy Control sent. Safe Browsing
-  (which asks Google about pages) is off.
+- **Cookies and tracking**: anything a page embeds gets a cookie jar of its
+  own for that site, and trackers get none; Gecko blocks ad, analytics, social,
+  fingerprinting and cryptomining trackers; Global Privacy Control sent. Not
+  Gecko's "content" trackers: those include Stripe's card forms and
+  Cloudflare's "are you human" checks, which sites can't work without. Safe
+  Browsing (which asks Google about pages) is off.
 - **Ad & tracker blocking**: EasyList, EasyPrivacy and uBlock's badware list,
   about 110k rules, as declarativeNetRequest rules Gecko runs natively. Gecko
   takes 30,000 rules from one extension, so the plugin's rules are spread over

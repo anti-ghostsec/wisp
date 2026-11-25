@@ -948,7 +948,7 @@ class MainActivity : Activity(), Plugins.Ui {
         Setting("HTTPS only", "https_only", true),
         Setting("Remove tracking parameters", "strip_tracking_params", true),
         Setting("Block cross-site cookies", "block_third_party_cookies", true),
-        Setting("Strict tracking protection", "tracking_prevention", true, restart = true),
+        Setting("Tracking protection", "tracking_prevention", true, restart = true),
         Setting("JavaScript", "javascript", true),
         Setting("WebGL (Standard level only)", "webgl", false),
         Setting("WebRTC (Standard level, not on Tor)", "webrtc", false),

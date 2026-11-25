@@ -70,9 +70,16 @@ object Engine {
         plugins = core.plugins()
         val dark = plugins.any { it.enabled && it.colorScheme == "dark" }
         val cfg = config
+        // Trackers blocked: ads, analytics, social, fingerprinters, miners.
+        // Not Gecko's "content" trackers, nor its strict list: those are
+        // what a page embeds to work, among them Stripe (card payments) and
+        // Cloudflare (sites' "are you human" checks), which then never load.
+        // Those embeds get a cookie jar of their own for each site instead
+        // (cookieBehavior), so they can't follow you from site to site; the
+        // ad blocker's lists still take out the trackers among them.
         val blocking = ContentBlocking.Settings.Builder()
-            .antiTracking(if (cfg.optBoolean("tracking_prevention", true)) ContentBlocking.AntiTracking.STRICT else ContentBlocking.AntiTracking.DEFAULT)
-            .enhancedTrackingProtectionLevel(if (cfg.optBoolean("tracking_prevention", true)) ContentBlocking.EtpLevel.STRICT else ContentBlocking.EtpLevel.DEFAULT)
+            .antiTracking(if (cfg.optBoolean("tracking_prevention", true)) ContentBlocking.AntiTracking.STRICT and ContentBlocking.AntiTracking.CONTENT.inv() else ContentBlocking.AntiTracking.DEFAULT)
+            .enhancedTrackingProtectionLevel(ContentBlocking.EtpLevel.DEFAULT)
             .strictSocialTrackingProtection(true)
             .cookieBehavior(cookieBehavior(cfg))
             .cookieBehaviorPrivateMode(cookieBehavior(cfg))
