@@ -1879,9 +1879,30 @@ impl BrowserWindow {
         vbox.append(&clear);
         vbox.append(&gtk::Button::builder().label("Quit Wisp (Ctrl+Q)").action_name("win.quit").build());
 
+        // Taller than the screen, a popover isn't shown at all: scroll instead,
+        // as tall as the menu or the screen allows.
+        let scroll = gtk::ScrolledWindow::builder()
+            .child(&vbox)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_height(true)
+            .propagate_natural_width(true)
+            .build();
         let popover = gtk::Popover::new();
-        popover.set_child(Some(&vbox));
+        popover.set_child(Some(&scroll));
         // Other windows may have changed plugins since.
+        let w = Rc::downgrade(self);
+        let sc = scroll.clone();
+        popover.connect_show(move |_| {
+            let Some(win) = w.upgrade() else { return };
+            let display = gtk::prelude::WidgetExt::display(&win.window);
+            let height = win
+                .window
+                .surface()
+                .and_then(|s| display.monitor_at_surface(&s))
+                .map(|m| m.geometry().height())
+                .unwrap_or(768);
+            sc.set_max_content_height((height - 160).max(240));
+        });
         let w = Rc::downgrade(self);
         popover.connect_show(move |_| {
             if let Some(win) = w.upgrade() {
