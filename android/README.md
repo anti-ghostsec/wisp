@@ -153,7 +153,9 @@ security fixes reach Wisp, so move to each one.
 Files are kept inside Wisp, where other apps can't see them, and *Wipe
 everything* deletes them. ☰ → **Downloads** lists what's downloading, with
 Cancel, and what's finished, to open, share, save to the phone (**Save…**,
-wherever you pick) or delete; a file leaves Wisp only that way. While one
+wherever you pick) or delete; a file leaves Wisp only that way. **Clear all**
+deletes every finished file and takes failed ones off the list (running ones
+carry on). While one
 downloads, a notification shows its progress, never the file's name (Android
 13 and later ask once whether Wisp may show notifications).
 

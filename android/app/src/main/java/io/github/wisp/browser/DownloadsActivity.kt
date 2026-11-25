@@ -30,6 +30,7 @@ import java.util.Date
 class DownloadsActivity : Activity() {
     private lateinit var list: ListView
     private lateinit var empty: TextView
+    private lateinit var clear: Button
     private var rows: List<Any> = emptyList()
     private val refresh = { reload() }
 
@@ -46,12 +47,19 @@ class DownloadsActivity : Activity() {
         }
         title = "Downloads"
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(palette.background) }
-        root.addView(TextView(this).apply {
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(16), dp(12), dp(4))
+        }
+        head.addView(TextView(this).apply {
             text = "Downloads"
             textSize = 22f
             setTextColor(palette.text)
-            setPadding(dp(16), dp(16), dp(16), dp(4))
-        })
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        clear = Button(this).apply { text = "Clear all"; setOnClickListener { askClear() } }
+        head.addView(clear)
+        root.addView(head)
         root.addView(TextView(this).apply {
             text = "Kept inside Wisp, where other apps can't see them, and deleted by Wipe everything. Open or share one, or save it to the phone to keep it outside Wisp."
             setTextColor(palette.dim)
@@ -92,6 +100,8 @@ class DownloadsActivity : Activity() {
     private fun reload() {
         rows = Downloads.jobs.toList() + Downloads.files(this)
         empty.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
+        // Only when there's something it would clear (not just running ones).
+        clear.visibility = if (rows.any { it !is Downloads.Job || it.state != Downloads.State.RUNNING }) View.VISIBLE else View.GONE
         adapter.notifyDataSetChanged()
     }
 
@@ -200,6 +210,22 @@ class DownloadsActivity : Activity() {
             .setTitle("Delete ${file.name}?")
             .setMessage("It's deleted from Wisp. Copies you saved to the phone or shared stay where they are.")
             .setPositiveButton("Delete") { _, _ -> Downloads.delete(this, file) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun askClear() {
+        val files = Downloads.files(this).size
+        SecureDialog(this)
+            .setTitle("Clear all downloads?")
+            .setMessage(
+                (if (files > 0) "The $files downloaded file${if (files == 1) "" else "s"} here ${if (files == 1) "is" else "are"} deleted from Wisp, and failed downloads are taken off the list. " else "Failed downloads are taken off the list. ") +
+                    "Downloads still running carry on. Copies you saved to the phone or shared stay where they are.",
+            )
+            .setPositiveButton("Clear all") { _, _ ->
+                val n = Downloads.clear(this)
+                Toast.makeText(this, if (n > 0) "Deleted $n file${if (n == 1) "" else "s"}" else "Cleared", Toast.LENGTH_SHORT).show()
+            }
             .setNegativeButton("Cancel", null)
             .show()
     }

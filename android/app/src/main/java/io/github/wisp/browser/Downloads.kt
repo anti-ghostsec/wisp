@@ -149,6 +149,18 @@ object Downloads {
         changed()
     }
 
+    /**
+     * Every finished download deleted, and what failed or was cancelled
+     * taken off the list. Downloads still running carry on. The number of
+     * files deleted.
+     */
+    fun clear(context: Context): Int {
+        val n = dir(context).listFiles().orEmpty().count { it.isFile && it.delete() }
+        jobs.removeAll { it.state != State.RUNNING }
+        changed()
+        return n
+    }
+
     fun forget(job: Job) {
         jobs.remove(job)
         changed()
