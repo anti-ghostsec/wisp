@@ -31,7 +31,11 @@ class Palette(val dark: Boolean) {
         activity.setTheme(theme)
         if (Build.VERSION.SDK_INT >= 30) {
             val light = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
-            activity.window.insetsController?.setSystemBarsAppearance(if (dark) 0 else light, light)
+            // Through the window's view, made now if it isn't yet: before
+            // super.onCreate some phones (Motorola, Android 14) have none,
+            // and asking the window alone crashes. Only the bars' icons,
+            // so never worth Wisp not starting.
+            runCatching { activity.window.decorView.windowInsetsController?.setSystemBarsAppearance(if (dark) 0 else light, light) }
         }
     }
 
