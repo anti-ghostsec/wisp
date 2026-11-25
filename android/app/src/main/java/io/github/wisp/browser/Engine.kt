@@ -124,9 +124,16 @@ object Engine {
         first.accept({ main.post { then() } }, { main.post { then() } })
     }
 
-    private fun cookieBehavior(cfg: JSONObject) =
-        if (cfg.optBoolean("block_third_party_cookies", true)) ContentBlocking.CookieBehavior.ACCEPT_FIRST_PARTY
-        else ContentBlocking.CookieBehavior.ACCEPT_FIRST_PARTY_AND_ISOLATE_OTHERS
+    /**
+     * On: trackers get no cookies or storage at all, and anything else a
+     * page embeds (a video player, say) gets a jar of its own for that one
+     * site, so it can't follow you to other sites. Refusing embeds any
+     * storage instead (as Wisp used to) broke most sites' video players,
+     * which throw when they're refused it. Off: only trackers are refused.
+     */
+    fun cookieBehavior(cfg: JSONObject) =
+        if (cfg.optBoolean("block_third_party_cookies", true)) ContentBlocking.CookieBehavior.ACCEPT_FIRST_PARTY_AND_ISOLATE_OTHERS
+        else ContentBlocking.CookieBehavior.ACCEPT_NON_TRACKERS
 
     /** How pages reach the internet. */
     enum class Route { DIRECT, TOR, ORBOT }
@@ -217,6 +224,13 @@ object Engine {
             // you allow when asked (MainActivity's askDrm).
             b("media.eme.enabled", true),
             b("media.mediadrm-widevinecdm.visible", true),
+            // Tabs are private (unless Keep cookies and site data is on):
+            // there Gecko refuses pages service workers and their cache,
+            // which many video players use and fail without. Kept in memory
+            // only and gone when Wisp closes, as the rest of a private tab.
+            b("dom.serviceWorkers.privateBrowsing.enabled", true),
+            b("dom.cache.privateBrowsing.enabled", true),
+            b("dom.indexedDB.privateBrowsing.enabled", true),
             b("privacy.fingerprintingProtection", true),
             b("privacy.fingerprintingProtection.pbmode", true),
             // On Tor, look like every other Tor user as far as Gecko can

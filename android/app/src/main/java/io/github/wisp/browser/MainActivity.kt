@@ -947,7 +947,7 @@ class MainActivity : Activity(), Plugins.Ui {
     private val settings = listOf(
         Setting("HTTPS only", "https_only", true),
         Setting("Remove tracking parameters", "strip_tracking_params", true),
-        Setting("Block third-party cookies", "block_third_party_cookies", true),
+        Setting("Block cross-site cookies", "block_third_party_cookies", true),
         Setting("Strict tracking protection", "tracking_prevention", true, restart = true),
         Setting("JavaScript", "javascript", true),
         Setting("WebGL (Standard level only)", "webgl", false),
@@ -993,8 +993,7 @@ class MainActivity : Activity(), Plugins.Ui {
         val s = Engine.runtime.settings
         s.setAllowInsecureConnections(if (cfg.optBoolean("https_only", true)) GeckoRuntimeSettings.HTTPS_ONLY else GeckoRuntimeSettings.ALLOW_ALL)
         val cb = s.contentBlocking
-        val behavior = if (cfg.optBoolean("block_third_party_cookies", true)) ContentBlocking.CookieBehavior.ACCEPT_FIRST_PARTY
-            else ContentBlocking.CookieBehavior.ACCEPT_FIRST_PARTY_AND_ISOLATE_OTHERS
+        val behavior = Engine.cookieBehavior(cfg)
         cb.setCookieBehavior(behavior)
         cb.setCookieBehaviorPrivateMode(behavior)
         cb.setQueryParameterStrippingEnabled(cfg.optBoolean("strip_tracking_params", true))
