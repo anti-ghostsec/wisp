@@ -1841,15 +1841,25 @@ impl BrowserWindow {
         vbox.append(&open_plugins);
         vbox.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 
-        let sync_button = gtk::Button::builder().label("Sync account…").action_name("win.sync-account").build();
+        // Both close the ☰ menu (and let go of its hold on the mouse and
+        // keyboard) before their window opens, as "Wisp password…" does:
+        // opened over a menu still up, a window could fail to come up in
+        // any browser window but the first.
+        let sync_button = gtk::Button::with_label("Sync account…");
+        let w = Rc::downgrade(self);
+        sync_button.connect_clicked(move |b| {
+            let Some(win) = w.upgrade() else { return };
+            close_menu_then(b, move || {
+                gtk::gio::prelude::ActionGroupExt::activate_action(&win.window, "sync-account", None);
+            });
+        });
         vbox.append(&sync_button);
 
         let edit = gtk::Button::with_label("Settings…");
         let w = Rc::downgrade(self);
-        edit.connect_clicked(move |_| {
-            if let Some(win) = w.upgrade() {
-                win.show_settings_editor();
-            }
+        edit.connect_clicked(move |b| {
+            let Some(win) = w.upgrade() else { return };
+            close_menu_then(b, move || win.show_settings_editor());
         });
         vbox.append(&edit);
 
@@ -4353,4 +4363,12 @@ mod tests {
         assert!(parse_settings(r#"{ "https_onyl": false }"#).unwrap_err().contains("https_onyl"));
         assert!(parse_settings(r#"{ "https_only": false, }"#).unwrap_err().starts_with("Line 1"));
     }
+}
+
+/// Closes the menu `button` is in, then (once it's gone) does `then`.
+fn close_menu_then(button: &gtk::Button, then: impl FnOnce() + 'static) {
+    if let Some(p) = button.ancestor(gtk::Popover::static_type()).and_downcast::<gtk::Popover>() {
+        p.popdown();
+    }
+    glib::idle_add_local_once(then);
 }
