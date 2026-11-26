@@ -4281,6 +4281,14 @@ fn short_address(uri: &str) -> &str {
     rest.strip_prefix("www.").unwrap_or(rest)
 }
 
+/// Closes the menu `button` is in, then (once it's gone) does `then`.
+fn close_menu_then(button: &gtk::Button, then: impl FnOnce() + 'static) {
+    if let Some(p) = button.ancestor(gtk::Popover::static_type()).and_downcast::<gtk::Popover>() {
+        p.popdown();
+    }
+    glib::idle_add_local_once(then);
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -4363,12 +4371,4 @@ mod tests {
         assert!(parse_settings(r#"{ "https_onyl": false }"#).unwrap_err().contains("https_onyl"));
         assert!(parse_settings(r#"{ "https_only": false, }"#).unwrap_err().starts_with("Line 1"));
     }
-}
-
-/// Closes the menu `button` is in, then (once it's gone) does `then`.
-fn close_menu_then(button: &gtk::Button, then: impl FnOnce() + 'static) {
-    if let Some(p) = button.ancestor(gtk::Popover::static_type()).and_downcast::<gtk::Popover>() {
-        p.popdown();
-    }
-    glib::idle_add_local_once(then);
 }
